@@ -19,12 +19,3 @@
 ## Validation
 - `app.py` passes Python syntax compilation with `py_compile`.
 - Full Flask runtime smoke testing could not be executed in this offline environment because the runtime container does not have Flask installed and package installation could not reach PyPI.
-
-
-## Institutional Intelligence — final AI layer
-- Replaced the basic AI page with a responsive PC/mobile Institutional Intelligence workspace.
-- Added role-aware aggregate live database context for people, academics, attendance, finance, operations and recent system activity.
-- Added persistent per-user AI conversations and recent investigation history in SQLite.
-- Added evidence/source badges and explicit safety boundaries: no secrets, unauthorized data or unapproved sensitive actions.
-- Kept the existing Render-compatible Flask/Gunicorn architecture, environment-based `OPENAI_API_KEY`, and Responses API integration.
-- Existing routes and modules remain intact; the AI layer is additive.

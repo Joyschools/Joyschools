@@ -655,17 +655,9 @@ def init_db() -> None:
         ensure_column(conn, "school_settings", "button_radius_px INTEGER NOT NULL DEFAULT 10")
         ensure_column(conn, "school_settings", "sidebar_style TEXT NOT NULL DEFAULT 'drawer'")
         ensure_column(conn, "school_settings", "custom_css TEXT NOT NULL DEFAULT ''")
-        # Institutional AI is local-first and works without any external provider.
-        # Legacy ai_* columns are kept for migration compatibility.
-        ensure_column(conn, "school_settings", "ai_enabled INTEGER NOT NULL DEFAULT 1")
-        ensure_column(conn, "school_settings", "ai_provider TEXT NOT NULL DEFAULT 'prime_system'")
-        ensure_column(conn, "school_settings", "ai_model TEXT NOT NULL DEFAULT 'Prime System AI'")
-        ensure_column(conn, "school_settings", "system_ai_enabled INTEGER NOT NULL DEFAULT 1")
-        ensure_column(conn, "school_settings", "external_ai_visible INTEGER NOT NULL DEFAULT 0")
-        ensure_column(conn, "school_settings", "external_ai_enabled INTEGER NOT NULL DEFAULT 0")
-        ensure_column(conn, "school_settings", "external_ai_provider TEXT NOT NULL DEFAULT 'openai_responses'")
-        ensure_column(conn, "school_settings", "external_ai_model TEXT NOT NULL DEFAULT 'gpt-5.6'")
-        conn.execute("UPDATE school_settings SET system_ai_enabled=1 WHERE system_ai_enabled IS NULL")
+        ensure_column(conn, "school_settings", "ai_enabled INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "school_settings", "ai_provider TEXT NOT NULL DEFAULT 'openai_responses'")
+        ensure_column(conn, "school_settings", "ai_model TEXT NOT NULL DEFAULT 'gpt-5.6'")
         ensure_column(conn, "school_settings", "help_phone TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "school_settings", "help_email TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "school_settings", "footer_title TEXT NOT NULL DEFAULT ''")
@@ -710,15 +702,6 @@ def init_db() -> None:
             status TEXT NOT NULL DEFAULT 'Success',
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL
-        );
-        CREATE TABLE IF NOT EXISTS ai_conversations (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            title TEXT NOT NULL DEFAULT 'New investigation',
-            messages_json TEXT NOT NULL DEFAULT '[]',
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
         );
         CREATE TABLE IF NOT EXISTS student_records (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -4547,395 +4530,59 @@ def system_help():
     }
     return render_template("system_help.html", role=user["role"], workspace=workspace_for(user["role"]), help_rows=visible, settings=settings, actor_name=user["full_name"], role_guide=role_guides.get(user["role"], settings["institution_portal_guide"]))
 
-def _ai_institution_snapshot(user):
-    """Build a role-aware, database-only snapshot for Prime System AI.
-
-    The snapshot is deliberately defensive because Prime may be upgraded against an
-    older persistent SQLite database. One missing/newly-migrated table must never
-    make the native AI fail completely.
-    """
-    role = user['role']
-    snap = {
-        'institution': {}, 'people': {}, 'academics': {}, 'attendance': {},
-        'finance': {}, 'operations': {}, 'activity': {}, 'scope': role,
-        'generated_at': datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')
-    }
-
-    def safe_one(sql, params=()):
-        try:
-            return q(sql, params, one=True)
-        except Exception:
-            return None
-
-    def safe_rows(sql, params=()):
-        try:
-            return q(sql, params)
-        except Exception:
-            return []
-
-    def has_table(name):
-        row = safe_one("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,))
-        return bool(row)
-
-    def money_value(value):
-        try:
-            return round(float(value or 0), 2)
-        except Exception:
-            return 0.0
-
-    try:
-        settings = school_settings()
-        snap['institution'] = {
-            'name': settings['school_name'] if settings and 'school_name' in settings.keys() else 'Prime Institution',
-            'currency': settings['currency_code'] if settings and 'currency_code' in settings.keys() else 'KES'
-        }
-    except Exception:
-        snap['institution'] = {'name': 'Prime Institution', 'currency': 'KES'}
-
-    r = safe_one('SELECT COUNT(*) c, SUM(CASE WHEN active=1 THEN 1 ELSE 0 END) active FROM students')
-    if r:
-        snap['people'] = {'learners_total': r['c'] or 0, 'learners_active': r['active'] or 0}
-
-    if role in {'Admin', 'ICT', 'Teacher', 'Finance', 'Librarian'}:
-        r = safe_one("SELECT COUNT(*) c, SUM(CASE WHEN active=1 THEN 1 ELSE 0 END) active FROM users WHERE role NOT IN ('System','Student','Parent')")
-        if r:
-            snap['people'].update({'employees_total': r['c'] or 0, 'employees_active': r['active'] or 0})
-
-    if role in {'Admin', 'ICT', 'Teacher', 'Student', 'Parent'} and has_table('markbook_entries'):
-        r = safe_one('SELECT COUNT(*) c, AVG(mark) avg_mark FROM markbook_entries')
-        if r:
-            snap['academics'].update({
-                'mark_entries': r['c'] or 0,
-                'average_mark': round(float(r['avg_mark']), 2) if r['avg_mark'] is not None else None,
-            })
-        if has_table('assignments'):
-            r = safe_one('SELECT COUNT(*) c FROM assignments'); snap['academics']['assignments'] = r['c'] if r else 0
-        if has_table('submissions'):
-            r = safe_one('SELECT COUNT(*) c FROM submissions'); snap['academics']['submissions'] = r['c'] if r else 0
-        a = snap['academics'].get('assignments', 0)
-        snap['academics']['submission_ratio'] = round((snap['academics'].get('submissions', 0) / a) * 100, 1) if a else None
-        rows = safe_rows("SELECT grade, COUNT(*) c, AVG(mark) avg_mark FROM markbook_entries JOIN students ON students.id=markbook_entries.student_id GROUP BY grade ORDER BY c DESC LIMIT 16")
-        snap['academics']['grade_summary'] = [
-            {'grade': x['grade'], 'entries': x['c'], 'average_mark': round(float(x['avg_mark']), 2) if x['avg_mark'] is not None else None}
-            for x in rows
-        ]
-
-    if role in {'Admin', 'ICT', 'Teacher', 'Student', 'Parent'} and has_table('class_attendance'):
-        now = datetime.utcnow(); month = now.strftime('%Y-%m'); prev = (now.replace(day=1) - timedelta(days=1)).strftime('%Y-%m')
-        rows = safe_rows("SELECT substr(attendance_date,1,7) month, COUNT(*) total, SUM(CASE WHEN status='Present' THEN 1 ELSE 0 END) present, SUM(CASE WHEN status='Absent' THEN 1 ELSE 0 END) absent, SUM(CASE WHEN status='Late' THEN 1 ELSE 0 END) late FROM class_attendance WHERE substr(attendance_date,1,7) IN (?,?) GROUP BY substr(attendance_date,1,7)", (month, prev))
-        snap['attendance']['monthly'] = [
-            {'month': x['month'], 'records': x['total'], 'present': x['present'] or 0,
-             'absent': x['absent'] or 0, 'late': x['late'] or 0,
-             'rate': round((x['present'] or 0) * 100 / x['total'], 1) if x['total'] else 0}
-            for x in rows
-        ]
-        rows = safe_rows('SELECT status, COUNT(*) c FROM class_attendance GROUP BY status')
-        snap['attendance']['by_status'] = {x['status']: x['c'] for x in rows}
-        rows = safe_rows("SELECT s.grade grade, COUNT(a.id) records, SUM(CASE WHEN a.status='Present' THEN 1 ELSE 0 END) present, SUM(CASE WHEN a.status='Absent' THEN 1 ELSE 0 END) absent, SUM(CASE WHEN a.status='Late' THEN 1 ELSE 0 END) late FROM class_attendance a JOIN students s ON s.id=a.student_id GROUP BY s.grade ORDER BY (present * 1.0 / records) ASC LIMIT 12")
-        snap['attendance']['grade_summary'] = [
-            {'grade': x['grade'], 'records': x['records'], 'present': x['present'] or 0,
-             'absent': x['absent'] or 0, 'late': x['late'] or 0,
-             'rate': round((x['present'] or 0) * 100 / x['records'], 1) if x['records'] else 0}
-            for x in rows
-        ]
-
-    if role in {'Admin', 'ICT', 'Finance'} and has_table('payments'):
-        r = safe_one("SELECT COALESCE(SUM(amount),0) total, COUNT(*) c FROM payments WHERE status='Posted'")
-        if r:
-            snap['finance'].update({'posted_payments_total': money_value(r['total']), 'posted_payment_count': r['c'] or 0})
-        if has_table('students'):
-            r = safe_one('SELECT COALESCE(SUM(balance),0) balance, COUNT(*) c FROM students WHERE active=1 AND balance>0')
-            if r:
-                snap['finance'].update({'outstanding_balance': money_value(r['balance']), 'learners_with_balance': r['c'] or 0})
-        rows = safe_rows("SELECT method, COUNT(*) c, COALESCE(SUM(amount),0) total FROM payments WHERE status='Posted' GROUP BY method ORDER BY total DESC")
-        snap['finance']['payment_methods'] = [{'method': x['method'], 'count': x['c'], 'total': money_value(x['total'])} for x in rows]
-        if has_table('finance_ledger'):
-            rows = safe_rows('SELECT entry_type, COUNT(*) c, COALESCE(SUM(amount),0) total FROM finance_ledger GROUP BY entry_type')
-            snap['finance']['ledger'] = [{'type': x['entry_type'], 'count': x['c'], 'total': money_value(x['total'])} for x in rows]
-
-    if role in {'Admin', 'ICT'}:
-        if has_table('notifications'):
-            r = safe_one('SELECT COUNT(*) c FROM notifications WHERE read_at IS NULL'); snap['operations']['unread_notifications'] = r['c'] if r else 0
-        if has_table('portal_messages'):
-            r = safe_one('SELECT COUNT(*) c FROM portal_messages'); snap['operations']['portal_messages'] = r['c'] if r else 0
-        if has_table('library_items'):
-            r = safe_one('SELECT COUNT(*) c FROM library_items'); snap['operations']['library_items'] = r['c'] if r else 0
-        if has_table('class_sessions'):
-            r = safe_one('SELECT COUNT(*) c FROM class_sessions'); snap['operations']['online_classes'] = r['c'] if r else 0
-        if has_table('users'):
-            rows = safe_rows("SELECT role, COUNT(*) c FROM users WHERE active=1 AND role!='System' GROUP BY role ORDER BY c DESC")
-            snap['people']['active_by_role'] = {x['role']: x['c'] for x in rows}
-        if has_table('audit_log'):
-            rows = safe_rows("SELECT action, COUNT(*) c FROM audit_log WHERE created_at >= datetime('now','-7 day') GROUP BY action ORDER BY c DESC LIMIT 15")
-            snap['activity']['audit_actions_7d'] = [{'action': x['action'], 'count': x['c']} for x in rows]
-
-    return snap
-
-def _ai_sources(snapshot):
-    names = {
-        'people': 'People & enrolment', 'academics': 'Academic activity', 'attendance': 'Attendance',
-        'finance': 'Finance', 'operations': 'Operations', 'activity': 'System activity'
-    }
-    return [{'label': names[key], 'type': 'Prime database aggregate'} for key in names if snapshot.get(key)]
-
-
-def _money(value, currency='KES'):
-    try:
-        return f"{currency} {float(value):,.2f}"
-    except Exception:
-        return f"{currency} 0.00"
-
-
-def _system_ai_answer(prompt, user, snapshot):
-    '''Deterministic institutional intelligence. No network, model key or external AI is used.'''
-    p = ' '.join((prompt or '').lower().split())
-    role = user['role']
-    name = snapshot['institution']['name']
-    currency = snapshot['institution']['currency']
-
-    if p in {'hi', 'hello', 'hey', 'good morning', 'good afternoon', 'good evening'}:
-        return (f"Hello {user['full_name'].split()[0]}. I’m Prime System AI, the built-in intelligence layer for {name}.\n\n"
-                "I work directly from the institutional data and system rules available to your role. Ask me about what is happening, what changed, what needs attention, or how to use Prime.")
-
-    if any(k in p for k in ['who are you', 'what are you', 'system ai', 'how do you work']):
-        return ("I’m Prime System AI. I am the native intelligence engine inside Prime Institution OS. "
-                "I do not require an external AI service to answer supported institutional questions. "
-                "I analyze authorized Prime data, explain system workflows, identify signals, and separate observed facts from recommendations.")
-
-    if any(k in p for k in ['what needs attention', 'executive summary', 'summary', 'biggest issue', 'priorit', 'overview', 'happening this week']):
-        parts = [f"Institution snapshot for {name}:"]
-        parts.append(f"• Learners: {snapshot['people'].get('learners_active', 0):,} active of {snapshot['people'].get('learners_total', 0):,} total.")
-        if snapshot['academics'].get('average_mark') is not None:
-            ratio = snapshot['academics'].get('submission_ratio')
-            parts.append(f"• Academic average: {snapshot['academics']['average_mark']:.1f}. Assignment records: {snapshot['academics'].get('assignments',0):,}; submissions: {snapshot['academics'].get('submissions',0):,}" + (f" ({ratio:.1f}% of assignment count)" if ratio is not None else '') + ".")
-        monthly = snapshot['attendance'].get('monthly') or []
-        if monthly:
-            latest = sorted(monthly, key=lambda x: x['month'])[-1]
-            parts.append(f"• Latest attendance period ({latest['month']}): {latest['rate']:.1f}% present, {latest['absent']:,} absences and {latest['late']:,} late records.")
-            if len(monthly) > 1:
-                previous = sorted(monthly, key=lambda x: x['month'])[-2]
-                delta = latest['rate'] - previous['rate']
-                parts.append(f"  Attendance movement vs {previous['month']}: {delta:+.1f} percentage points.")
-        if 'outstanding_balance' in snapshot['finance']:
-            parts.append(f"• Finance exposure: {_money(snapshot['finance']['outstanding_balance'], currency)} outstanding across {snapshot['finance']['learners_with_balance']:,} active learners.")
-        alerts = []
-        for row in snapshot['attendance'].get('grade_summary', [])[:5]:
-            if row['rate'] < 80:
-                alerts.append(f"attendance in {row['grade']} is {row['rate']:.1f}%")
-        for row in snapshot['academics'].get('grade_summary', [])[:8]:
-            if row.get('average_mark') is not None and row['average_mark'] < 45:
-                alerts.append(f"average marks in {row['grade']} are {row['average_mark']:.1f}")
-        if alerts:
-            parts.append("• Priority signals: " + '; '.join(alerts[:4]) + ".")
-        else:
-            parts.append("• No high-confidence critical threshold crossed in the built-in checks available to this role.")
-        parts.append("\nRecommended next move: ask me to drill into attendance, academics, finance, or a specific grade so I can explain the evidence behind the signal.")
-        return '\n'.join(parts)
-
-    if 'attendance' in p or 'absent' in p or 'late' in p:
-        monthly = sorted(snapshot['attendance'].get('monthly') or [], key=lambda x: x['month'])
-        if not monthly:
-            return "I don't have attendance records available in your authorized Prime data yet."
-        lines = ["Attendance analysis"]
-        for m in monthly:
-            lines.append(f"• {m['month']}: {m['rate']:.1f}% present; {m['absent']:,} absent; {m['late']:,} late.")
-        if len(monthly) > 1:
-            d = monthly[-1]['rate'] - monthly[-2]['rate']
-            direction = 'improved' if d > 0 else 'declined' if d < 0 else 'held steady'
-            lines.append(f"Observed movement: attendance {direction} by {abs(d):.1f} percentage points.")
-        grades = snapshot['attendance'].get('grade_summary') or []
-        if grades:
-            lines.append("Lowest observed grade-level rates:")
-            for row in grades[:5]:
-                lines.append(f"• {row['grade']}: {row['rate']:.1f}% ({row['absent']:,} absent of {row['records']:,} records).")
-        return '\n'.join(lines)
-
-    if any(k in p for k in ['academic', 'performance', 'marks', 'grades', 'results', 'assignment', 'submission']):
-        a = snapshot['academics']
-        if not a:
-            return "Academic data is not exposed to your current role."
-        lines = ["Academic analysis"]
-        if a.get('average_mark') is not None:
-            lines.append(f"• Overall mark average: {a['average_mark']:.1f} across {a.get('mark_entries',0):,} mark records.")
-        lines.append(f"• Assignments: {a.get('assignments',0):,}; submissions: {a.get('submissions',0):,}.")
-        if a.get('submission_ratio') is not None:
-            lines.append(f"• Submission-to-assignment count ratio: {a['submission_ratio']:.1f}%.")
-        for row in a.get('grade_summary', [])[:8]:
-            avg = 'n/a' if row.get('average_mark') is None else f"{row['average_mark']:.1f}"
-            lines.append(f"• {row['grade']}: {avg} average from {row['entries']:,} mark entries.")
-        return '\n'.join(lines)
-
-    if any(k in p for k in ['finance', 'fee', 'fees', 'payment', 'arrears', 'balance', 'money', 'collection']):
-        f = snapshot['finance']
-        if not f:
-            return "Finance intelligence is not exposed to your current role."
-        lines = ["Finance analysis"]
-        lines.append(f"• Posted collections: {_money(f.get('posted_payments_total',0), currency)} across {f.get('posted_payment_count',0):,} payments.")
-        lines.append(f"• Outstanding learner balances: {_money(f.get('outstanding_balance',0), currency)} across {f.get('learners_with_balance',0):,} active learners.")
-        if f.get('payment_methods'):
-            lines.append("• Collections by method:")
-            for x in f['payment_methods'][:6]: lines.append(f"  – {x['method']}: {_money(x['total'], currency)} ({x['count']:,}).")
-        return '\n'.join(lines)
-
-    if any(k in p for k in ['student', 'learner', 'enrol', 'staff', 'employee', 'user']):
-        lines = ["People & enrolment"]
-        lines.append(f"• Active learners: {snapshot['people'].get('learners_active',0):,} of {snapshot['people'].get('learners_total',0):,} total.")
-        if snapshot['people'].get('employees_total') is not None:
-            lines.append(f"• Employees: {snapshot['people'].get('employees_active',0):,} active of {snapshot['people'].get('employees_total',0):,} total.")
-        if snapshot['people'].get('active_by_role'):
-            lines.append("• Active users by role: " + ', '.join(f"{k} {v:,}" for k,v in snapshot['people']['active_by_role'].items()) + '.')
-        return '\n'.join(lines)
-
-    if any(k in p for k in ['notification', 'message', 'library', 'online class', 'portal', 'operation', 'activity']):
-        o = snapshot['operations']
-        if not o:
-            return "Operational intelligence is only available to Admin and ICT roles."
-        lines = ["Operational activity"]
-        lines.append(f"• Unread notifications: {o.get('unread_notifications',0):,}.")
-        lines.append(f"• Portal messages: {o.get('portal_messages',0):,}.")
-        lines.append(f"• Library items: {o.get('library_items',0):,}.")
-        lines.append(f"• Online class sessions: {o.get('online_classes',0):,}.")
-        return '\n'.join(lines)
-
-    if any(k in p for k in ['how do i', 'where do i', 'how to', 'help me use', 'find a feature', 'system help']):
-        return ("I can explain Prime workflows and navigation, but I will not invent a page or permission. "
-                "Tell me the task you want to complete, for example: ‘record a payment’, ‘review attendance’, ‘publish results’, or ‘manage users’, and I’ll give the safest workflow for your current role.")
-
-    if 'why' in p:
-        return ("I can investigate the ‘why’ behind a Prime signal when the underlying records expose enough evidence. "
-                "Start with the area you mean—attendance, academic performance, finance, operations, or a specific grade/class—and I’ll separate the observed evidence from interpretation.")
-
-    return (f"I can work with Prime as the built-in system AI, using the authorized institutional signals available to your role.\n\n"
-            "Try asking: ‘What needs attention this week?’, ‘Analyze attendance trends’, ‘Show academic signals’, or ‘How do I record a payment?’")
-
-
-def _external_ai_request(prompt, user, snapshot, settings, history):
-    '''Optional external provider. Never called unless an Admin/ICT explicitly enables it.'''
-    provider = settings['external_ai_provider'] or 'openai_responses'
-    model = settings['external_ai_model'] or 'gpt-5.6'
-    api_key = os.environ.get('OPENAI_API_KEY', '').strip()
-    if not api_key:
-        raise RuntimeError('The optional external AI is enabled, but its server connection is not configured.')
-    system_prompt = ("You are an optional external reasoning assistant inside Prime Institution OS. "
-                     "Respect the current user role and authorized snapshot. Never invent data or bypass permissions.\n\n" + json.dumps(snapshot, ensure_ascii=False))
-    messages = [{'role':'system','content':system_prompt}] + history[-10:] + [{'role':'user','content':prompt}]
-    if provider == 'openai_chat_completions':
-        payload = json.dumps({'model': model, 'messages': messages, 'temperature': 0.2}).encode()
-        req = urllib.request.Request('https://api.openai.com/v1/chat/completions', data=payload, headers={'Authorization':f'Bearer {api_key}', 'Content-Type':'application/json'}, method='POST')
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            data = json.loads(resp.read().decode())
-        return (data.get('choices') or [{}])[0].get('message',{}).get('content','').strip(), provider, model
-    payload = json.dumps({'model': model, 'input': messages}).encode()
-    req = urllib.request.Request('https://api.openai.com/v1/responses', data=payload, headers={'Authorization':f'Bearer {api_key}', 'Content-Type':'application/json'}, method='POST')
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        data = json.loads(resp.read().decode())
-    answer = (data.get('output_text') or '').strip()
-    if not answer:
-        for item in data.get('output', []):
-            for part in item.get('content', []):
-                if part.get('type') == 'output_text' and part.get('text'):
-                    answer += part['text']
-    return answer.strip(), provider, model
-
-
-@app.route('/ai-assistant')
+@app.route("/ai-assistant")
 @login_required
 def ai_assistant():
-    user = current_user(); settings = school_settings()
-    ref = request.referrer or ''
-    back_url = ref if ref.startswith(request.host_url) and '/ai-assistant' not in ref else url_for('dashboard')
-    return render_template('ai_assistant.html', role=user['role'], workspace=workspace_for(user['role']), settings=settings,
-                           actor_name=user['full_name'], back_url=back_url,
-                           external_visible=bool(settings['external_ai_visible']),
-                           can_manage_ai=user['role'] in {'Admin','ICT'})
+    return render_template("ai_assistant.html", role=current_user()["role"], workspace=workspace_for(current_user()["role"]), settings=school_settings(), actor_name=current_user()["full_name"])
 
-@app.route('/ai/history')
-@login_required
-def ai_history():
-    rows=q('SELECT id,title,created_at,updated_at FROM ai_conversations WHERE user_id=? ORDER BY updated_at DESC LIMIT 30',(current_user()['id'],)); return jsonify({'conversations':[dict(x) for x in rows]})
-
-@app.route('/ai/conversation/<int:conversation_id>',methods=['GET','DELETE'])
-@login_required
-def ai_conversation(conversation_id):
-    user=current_user(); row=q('SELECT * FROM ai_conversations WHERE id=? AND user_id=?',(conversation_id,user['id']),one=True)
-    if not row:return jsonify({'error':'Conversation not found.'}),404
-    if request.method=='DELETE': execute('DELETE FROM ai_conversations WHERE id=? AND user_id=?',(conversation_id,user['id'])); return jsonify({'ok':True})
-    return jsonify({'id':row['id'],'title':row['title'],'messages':json.loads(row['messages_json'] or '[]')})
-
-@app.route('/ai/ask',methods=['POST'])
+@app.route("/ai/ask", methods=["POST"])
 @login_required
 def ai_ask():
     settings=school_settings(); user=current_user()
-    if not int(settings['system_ai_enabled'] or 0):
-        return jsonify({'error':'Prime System AI is currently disabled by an authorized administrator.'}),403
-    body=request.get_json(silent=True) or {}; prompt=(request.form.get('prompt') or body.get('prompt') or '').strip(); conversation_id=body.get('conversation_id')
-    if not prompt:return jsonify({'error':'Enter a question.'}),400
-    if len(prompt)>8000:return jsonify({'error':'Question is too long.'}),400
-    # Build the native context defensively. A partially migrated persistent DB must
-    # never take down Prime System AI as a whole.
+    if not int(settings["ai_enabled"] or 0): return jsonify({"error":"AI assistance is disabled by the administrator."}),403
+    prompt=(request.form.get("prompt") or (request.get_json(silent=True) or {}).get("prompt") or "").strip()
+    if not prompt: return jsonify({"error":"Enter a question."}),400
+    if len(prompt)>8000: return jsonify({"error":"Question is too long."}),400
+    provider=settings["ai_provider"] or "openai_responses"; model=settings["ai_model"] or "gpt-5.6"
+    api_key=os.environ.get("OPENAI_API_KEY","").strip()
+    if not api_key: return jsonify({"error":"OpenAI API is not configured on this server yet. Set OPENAI_API_KEY in the deployment environment."}),503
+    system_prompt=f"You are the institutional AI assistant for {settings['school_name']}. User role: {user['role']}. Be practical, concise, safe, and never invent private institutional data. If data is not supplied in the conversation, say so."
     try:
-        snapshot=_ai_institution_snapshot(user)
-    except Exception:
-        snapshot={
-            'institution': {'name': 'Prime Institution', 'currency': 'KES'},
-            'people': {}, 'academics': {}, 'attendance': {}, 'finance': {},
-            'operations': {}, 'activity': {}, 'scope': user.get('role','User')
-        }
-    sources=_ai_sources(snapshot); row=None
-    if conversation_id:row=q('SELECT * FROM ai_conversations WHERE id=? AND user_id=?',(conversation_id,user['id']),one=True)
-    if not row:
-        execute('INSERT INTO ai_conversations(user_id,title,messages_json) VALUES(?,?,?)',(user['id'],prompt[:80],'[]')); conversation_id=q('SELECT last_insert_rowid() id',one=True)['id']; row=q('SELECT * FROM ai_conversations WHERE id=?',(conversation_id,),one=True)
-    history=json.loads(row['messages_json'] or '[]')[-10:]
-    use_external = bool(settings['external_ai_visible'] and settings['external_ai_enabled'] and body.get('mode') == 'external' and user['role'] in {'Admin','ICT'})
-    provider='prime_system'; model='Prime System AI'
-    try:
-        if use_external:
-            answer, provider, model = _external_ai_request(prompt, user, snapshot, settings, history)
+        if provider=="openai_chat_completions":
+            payload=json.dumps({"model":model,"messages":[{"role":"system","content":system_prompt},{"role":"user","content":prompt}],"temperature":0.2}).encode()
+            req=urllib.request.Request("https://api.openai.com/v1/chat/completions",data=payload,headers={"Authorization":f"Bearer {api_key}","Content-Type":"application/json"},method="POST")
+            with urllib.request.urlopen(req,timeout=45) as resp: data=json.loads(resp.read().decode())
+            answer=data.get("choices",[{}])[0].get("message",{}).get("content","")
         else:
-            answer = _system_ai_answer(prompt, user, snapshot)
-        history=(history+[{'role':'user','content':prompt},{'role':'assistant','content':answer}])[-12:]
-        execute('UPDATE ai_conversations SET messages_json=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND user_id=?',(json.dumps(history,ensure_ascii=False),conversation_id,user['id']))
-        execute('INSERT INTO ai_usage_log(user_id,role,provider,model,prompt_preview,response_preview,status) VALUES(?,?,?,?,?,?,?)',(user['id'],user['role'],provider,model,prompt[:300],answer[:500],'Success'))
-        return jsonify({'answer':answer,'conversation_id':conversation_id,'sources':sources,'engine':provider})
+            payload=json.dumps({"model":model,"input":[{"role":"system","content":system_prompt},{"role":"user","content":prompt}]}).encode()
+            req=urllib.request.Request("https://api.openai.com/v1/responses",data=payload,headers={"Authorization":f"Bearer {api_key}","Content-Type":"application/json"},method="POST")
+            with urllib.request.urlopen(req,timeout=45) as resp: data=json.loads(resp.read().decode())
+            answer=(data.get("output_text") or "").strip()
+            if not answer:
+                chunks=[]
+                for item in data.get("output",[]) or []:
+                    for content in item.get("content",[]) or []:
+                        if content.get("type") in {"output_text","text"}: chunks.append(content.get("text","") or content.get("output_text",""))
+                answer="\n".join(chunks).strip()
+        if not answer: raise RuntimeError("AI returned an empty response.")
+        execute("INSERT INTO ai_usage_log(user_id,role,provider,model,prompt_preview,response_preview,status) VALUES(?,?,?,?,?,?,?)",(user["id"],user["role"],provider,model,prompt[:300],answer[:500],"Success"))
+        return jsonify({"answer":answer,"provider":provider,"model":model})
     except Exception as exc:
-        # Never expose a generic network-style failure for the native engine.
-        # Prime System AI should remain useful even when one auxiliary operation
-        # or optional conversation persistence step is unavailable.
-        if not use_external:
-            answer = (
-                "Prime System AI is online. One or more detailed institutional data sources are temporarily unavailable, "
-                "but the built-in engine is still running inside Prime. Try a narrower question such as "
-                "‘attendance’, ‘academic performance’, ‘finance’, or ‘how do I record a payment?’"
-            )
-            try:
-                execute('INSERT INTO ai_usage_log(user_id,role,provider,model,prompt_preview,response_preview,status) VALUES(?,?,?,?,?,?,?)',(user['id'],user['role'],'prime_system','Prime System AI',prompt[:300],answer[:500],'Degraded'))
-            except Exception:
-                pass
-            return jsonify({'answer':answer,'conversation_id':conversation_id,'sources':sources,'engine':'prime_system','degraded':True})
-        try:
-            execute('INSERT INTO ai_usage_log(user_id,role,provider,model,prompt_preview,response_preview,status) VALUES(?,?,?,?,?,?,?)',(user['id'],user['role'],provider,model,prompt[:300],str(exc)[:500],'Failed'))
-        except Exception:
-            pass
-        return jsonify({'error':str(exc),'conversation_id':conversation_id,'engine':provider}),502
+        execute("INSERT INTO ai_usage_log(user_id,role,provider,model,prompt_preview,response_preview,status) VALUES(?,?,?,?,?,?,?)",(user["id"],user["role"],provider,model,prompt[:300],str(exc)[:500],"Failed"))
+        return jsonify({"error":f"AI request failed: {exc}"}),502
 
-@app.route('/admin/ai-settings', methods=['GET','POST'])
+@app.route("/admin/ai-settings", methods=["POST"])
 @login_required
-@role_required('Admin','ICT')
+@role_required("Admin")
 def admin_ai_settings():
-    settings=school_settings(); user=current_user()
-    if request.method=='POST':
-        system_enabled=1 if request.form.get('system_ai_enabled') else 0
-        external_visible=1 if request.form.get('external_ai_visible') else 0
-        external_enabled=1 if request.form.get('external_ai_enabled') else 0
-        provider=request.form.get('external_ai_provider','openai_responses')
-        if provider not in {'openai_responses','openai_chat_completions'}: provider='openai_responses'
-        model=request.form.get('external_ai_model','gpt-5.6').strip() or 'gpt-5.6'
-        execute("UPDATE school_settings SET system_ai_enabled=?, ai_enabled=?, ai_provider='prime_system', ai_model='Prime System AI', external_ai_visible=?, external_ai_enabled=?, external_ai_provider=?, external_ai_model=? WHERE id=1",
-                 (system_enabled, system_enabled, external_visible, external_enabled if external_visible else 0, provider, model))
-        audit(user['id'],user['full_name'],'AI Settings',f"Prime System AI {'enabled' if system_enabled else 'disabled'}; optional external AI {'visible' if external_visible else 'hidden'} and {'enabled' if external_enabled and external_visible else 'disabled'}.")
-        flash('AI settings saved. Prime System AI remains local-first and external AI is optional.','success')
-        return redirect(url_for('admin_ai_settings'))
-    return render_template('ai_settings.html', settings=settings, actor_name=user['full_name'], role=user['role'], workspace=workspace_for(user['role']))
+    enabled=1 if request.form.get("ai_enabled") else 0
+    provider=request.form.get("ai_provider","openai_responses")
+    if provider not in {"openai_responses","openai_chat_completions"}: provider="openai_responses"
+    model=request.form.get("ai_model","gpt-5.6").strip() or "gpt-5.6"
+    execute("UPDATE school_settings SET ai_enabled=?, ai_provider=?, ai_model=? WHERE id=1",(enabled,provider,model))
+    audit(current_user()["id"],current_user()["full_name"],"AI Settings",f"AI {'enabled' if enabled else 'disabled'} using {provider} / {model}.")
+    flash("AI configuration saved. API keys remain server-side only.","success")
+    return redirect(url_for("admin_dashboard"))
 
 @app.route("/admin/help/save", methods=["POST"])
 @login_required
