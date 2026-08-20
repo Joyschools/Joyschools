@@ -19,8 +19,13 @@
 .hide{display:none!important}.mobile-only{display:none}
 @media(max-width:900px){body.app-body{overflow:hidden}.ai-shell{display:block}.ai-side{display:none}.ai-top{padding:10px 12px}.ai-top-title{font-size:12px}.ai-conversation{width:min(100%,720px);padding:22px 14px 12px}.ai-welcome{margin:7vh auto 0}.ai-welcome h1{font-size:clamp(28px,9vw,40px)}.ai-chips{grid-template-columns:1fr;gap:8px;margin:20px 0}.ai-chip{padding:12px}.ai-composer-wrap{padding:9px 10px 12px}.ai-composer{width:100%}.ai-form{border-radius:14px;padding:6px;background:#111b2c}.ai-form textarea{min-height:48px;font-size:15px;padding:10px 8px}.ai-send{width:48px;min-width:48px;height:46px;border-radius:11px;font-size:0}.ai-send:after{content:'↑';font-size:19px}.ai-tools{padding:6px 2px 0}.msg{max-width:96%;margin-bottom:18px}.bubble{font-size:14px}.ai-close{width:30px;height:30px;border-radius:9px}.external-switch{display:none}}
 @media(max-width:480px){.ai-top-meta{display:none}.ai-conversation{padding-left:10px;padding-right:10px}.ai-welcome p{font-size:13px}.ai-welcome{margin-top:5vh}.msg-avatar{width:29px;height:29px}.ai-user{display:none}}
+
+/* Prime AI is a standalone workspace. Do not inherit the main portal grid. */
+body.app-body.ai-page{display:block!important;grid-template-columns:none!important;gap:0!important;padding:0!important;overflow:hidden!important;align-items:stretch!important;width:100vw!important;max-width:none!important;min-width:0!important}
+body.app-body.ai-page .ai-shell{width:100vw!important;max-width:none!important;min-width:0!important}
+@media(max-width:900px){body.app-body.ai-page{padding:0!important;width:100vw!important}}
 </style></head>
-<body class="app-body">
+<body class="app-body ai-page">
 <div class="ai-shell">
 <aside class="ai-side">
   <div class="ai-brand"><div class="ai-logo">P</div><div><div class="ai-brand-title">Prime System AI</div><div class="ai-brand-sub">Institutional intelligence</div></div></div>

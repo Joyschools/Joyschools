@@ -4548,62 +4548,90 @@ def system_help():
     return render_template("system_help.html", role=user["role"], workspace=workspace_for(user["role"]), help_rows=visible, settings=settings, actor_name=user["full_name"], role_guide=role_guides.get(user["role"], settings["institution_portal_guide"]))
 
 def _ai_institution_snapshot(user):
-    '''Build a role-aware, database-only snapshot for Prime System AI.'''
+    """Build a role-aware, database-only snapshot for Prime System AI.
+
+    The snapshot is deliberately defensive because Prime may be upgraded against an
+    older persistent SQLite database. One missing/newly-migrated table must never
+    make the native AI fail completely.
+    """
     role = user['role']
     snap = {
         'institution': {}, 'people': {}, 'academics': {}, 'attendance': {},
         'finance': {}, 'operations': {}, 'activity': {}, 'scope': role,
         'generated_at': datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')
     }
-    settings = school_settings()
-    snap['institution'] = {'name': settings['school_name'], 'currency': settings['currency_code']}
 
-    r = q('SELECT COUNT(*) c, SUM(CASE WHEN active=1 THEN 1 ELSE 0 END) active FROM students', one=True)
-    snap['people'] = {'learners_total': r['c'] or 0, 'learners_active': r['active'] or 0}
+    def safe_one(sql, params=()):
+        try:
+            return q(sql, params, one=True)
+        except Exception:
+            return None
+
+    def safe_rows(sql, params=()):
+        try:
+            return q(sql, params)
+        except Exception:
+            return []
+
+    def has_table(name):
+        row = safe_one("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,))
+        return bool(row)
+
+    def money_value(value):
+        try:
+            return round(float(value or 0), 2)
+        except Exception:
+            return 0.0
+
+    try:
+        settings = school_settings()
+        snap['institution'] = {
+            'name': settings['school_name'] if settings and 'school_name' in settings.keys() else 'Prime Institution',
+            'currency': settings['currency_code'] if settings and 'currency_code' in settings.keys() else 'KES'
+        }
+    except Exception:
+        snap['institution'] = {'name': 'Prime Institution', 'currency': 'KES'}
+
+    r = safe_one('SELECT COUNT(*) c, SUM(CASE WHEN active=1 THEN 1 ELSE 0 END) active FROM students')
+    if r:
+        snap['people'] = {'learners_total': r['c'] or 0, 'learners_active': r['active'] or 0}
+
     if role in {'Admin', 'ICT', 'Teacher', 'Finance', 'Librarian'}:
-        r = q("SELECT COUNT(*) c, SUM(CASE WHEN active=1 THEN 1 ELSE 0 END) active FROM users WHERE role NOT IN ('System','Student','Parent')", one=True)
-        snap['people'].update({'employees_total': r['c'] or 0, 'employees_active': r['active'] or 0})
+        r = safe_one("SELECT COUNT(*) c, SUM(CASE WHEN active=1 THEN 1 ELSE 0 END) active FROM users WHERE role NOT IN ('System','Student','Parent')")
+        if r:
+            snap['people'].update({'employees_total': r['c'] or 0, 'employees_active': r['active'] or 0})
 
-    if role in {'Admin', 'ICT', 'Teacher', 'Student', 'Parent'}:
-        r = q('SELECT COUNT(*) c, AVG(mark) avg_mark FROM markbook_entries', one=True)
-        snap['academics'].update({
-            'mark_entries': r['c'] or 0,
-            'average_mark': round(float(r['avg_mark']), 2) if r['avg_mark'] is not None else None,
-        })
-        r = q('SELECT COUNT(*) c FROM assignments', one=True); snap['academics']['assignments'] = r['c'] or 0
-        r = q('SELECT COUNT(*) c FROM submissions', one=True); snap['academics']['submissions'] = r['c'] or 0
-        a = snap['academics']['assignments']
-        snap['academics']['submission_ratio'] = round((snap['academics']['submissions'] / a) * 100, 1) if a else None
-        rows = q('''SELECT grade, COUNT(*) c, AVG(mark) avg_mark
-                    FROM markbook_entries JOIN students ON students.id=markbook_entries.student_id
-                    GROUP BY grade ORDER BY c DESC LIMIT 16''')
+    if role in {'Admin', 'ICT', 'Teacher', 'Student', 'Parent'} and has_table('markbook_entries'):
+        r = safe_one('SELECT COUNT(*) c, AVG(mark) avg_mark FROM markbook_entries')
+        if r:
+            snap['academics'].update({
+                'mark_entries': r['c'] or 0,
+                'average_mark': round(float(r['avg_mark']), 2) if r['avg_mark'] is not None else None,
+            })
+        if has_table('assignments'):
+            r = safe_one('SELECT COUNT(*) c FROM assignments'); snap['academics']['assignments'] = r['c'] if r else 0
+        if has_table('submissions'):
+            r = safe_one('SELECT COUNT(*) c FROM submissions'); snap['academics']['submissions'] = r['c'] if r else 0
+        a = snap['academics'].get('assignments', 0)
+        snap['academics']['submission_ratio'] = round((snap['academics'].get('submissions', 0) / a) * 100, 1) if a else None
+        rows = safe_rows("SELECT grade, COUNT(*) c, AVG(mark) avg_mark FROM markbook_entries JOIN students ON students.id=markbook_entries.student_id GROUP BY grade ORDER BY c DESC LIMIT 16")
         snap['academics']['grade_summary'] = [
             {'grade': x['grade'], 'entries': x['c'], 'average_mark': round(float(x['avg_mark']), 2) if x['avg_mark'] is not None else None}
             for x in rows
         ]
 
-    if role in {'Admin', 'ICT', 'Teacher', 'Student', 'Parent'}:
+    if role in {'Admin', 'ICT', 'Teacher', 'Student', 'Parent'} and has_table('class_attendance'):
         now = datetime.utcnow(); month = now.strftime('%Y-%m'); prev = (now.replace(day=1) - timedelta(days=1)).strftime('%Y-%m')
-        rows = q('''SELECT substr(attendance_date,1,7) month, COUNT(*) total,
-                    SUM(CASE WHEN status='Present' THEN 1 ELSE 0 END) present,
-                    SUM(CASE WHEN status='Absent' THEN 1 ELSE 0 END) absent,
-                    SUM(CASE WHEN status='Late' THEN 1 ELSE 0 END) late
-                    FROM class_attendance WHERE substr(attendance_date,1,7) IN (?,?)
-                    GROUP BY substr(attendance_date,1,7)''', (month, prev))
+        rows = safe_rows("SELECT substr(attendance_date,1,7) month, COUNT(*) total, SUM(CASE WHEN status='Present' THEN 1 ELSE 0 END) present, SUM(CASE WHEN status='Absent' THEN 1 ELSE 0 END) absent, SUM(CASE WHEN status='Late' THEN 1 ELSE 0 END) late FROM class_attendance WHERE substr(attendance_date,1,7) IN (?,?) GROUP BY substr(attendance_date,1,7)", (month, prev))
         snap['attendance']['monthly'] = [
             {'month': x['month'], 'records': x['total'], 'present': x['present'] or 0,
              'absent': x['absent'] or 0, 'late': x['late'] or 0,
              'rate': round((x['present'] or 0) * 100 / x['total'], 1) if x['total'] else 0}
             for x in rows
         ]
-        rows = q('SELECT status, COUNT(*) c FROM class_attendance GROUP BY status')
+        rows = safe_rows('SELECT status, COUNT(*) c FROM class_attendance GROUP BY status')
         snap['attendance']['by_status'] = {x['status']: x['c'] for x in rows}
-        rows = q('''SELECT s.grade grade, COUNT(a.id) records,
-                    SUM(CASE WHEN a.status='Present' THEN 1 ELSE 0 END) present,
-                    SUM(CASE WHEN a.status='Absent' THEN 1 ELSE 0 END) absent,
-                    SUM(CASE WHEN a.status='Late' THEN 1 ELSE 0 END) late
-                    FROM class_attendance a JOIN students s ON s.id=a.student_id
-                    GROUP BY s.grade HAVING records > 0 ORDER BY (present * 1.0 / records) ASC LIMIT 12''')
+        rows = safe_rows("SELECT s.grade grade, COUNT(a.id) records, SUM(CASE WHEN a.status='Present' THEN 1 ELSE 0 END) present, SUM(CASE WHEN a.status='Absent' THEN 1 ELSE 0 END) absent, SUM(CASE WHEN a.status='Late' THEN 1 ELSE 0 END) late FROM class_attendance a JOIN students s ON s.id=a.student_id GROUP BY s.grade ORDER BY (present * 1.0 / records) ASC LIMIT 12")
         snap['attendance']['grade_summary'] = [
             {'grade': x['grade'], 'records': x['records'], 'present': x['present'] or 0,
              'absent': x['absent'] or 0, 'late': x['late'] or 0,
@@ -4611,28 +4639,37 @@ def _ai_institution_snapshot(user):
             for x in rows
         ]
 
-    if role in {'Admin', 'ICT', 'Finance'}:
-        r = q("SELECT COALESCE(SUM(amount),0) total, COUNT(*) c FROM payments WHERE status='Posted'", one=True)
-        snap['finance'].update({'posted_payments_total': round(float(r['total'] or 0), 2), 'posted_payment_count': r['c'] or 0})
-        r = q('SELECT COALESCE(SUM(balance),0) balance, COUNT(*) c FROM students WHERE active=1 AND balance>0', one=True)
-        snap['finance'].update({'outstanding_balance': round(float(r['balance'] or 0), 2), 'learners_with_balance': r['c'] or 0})
-        rows = q("SELECT method, COUNT(*) c, COALESCE(SUM(amount),0) total FROM payments WHERE status='Posted' GROUP BY method ORDER BY total DESC")
-        snap['finance']['payment_methods'] = [{'method': x['method'], 'count': x['c'], 'total': round(float(x['total'] or 0), 2)} for x in rows]
-        rows = q('SELECT entry_type, COUNT(*) c, COALESCE(SUM(amount),0) total FROM finance_ledger GROUP BY entry_type')
-        snap['finance']['ledger'] = [{'type': x['entry_type'], 'count': x['c'], 'total': round(float(x['total'] or 0), 2)} for x in rows]
+    if role in {'Admin', 'ICT', 'Finance'} and has_table('payments'):
+        r = safe_one("SELECT COALESCE(SUM(amount),0) total, COUNT(*) c FROM payments WHERE status='Posted'")
+        if r:
+            snap['finance'].update({'posted_payments_total': money_value(r['total']), 'posted_payment_count': r['c'] or 0})
+        if has_table('students'):
+            r = safe_one('SELECT COALESCE(SUM(balance),0) balance, COUNT(*) c FROM students WHERE active=1 AND balance>0')
+            if r:
+                snap['finance'].update({'outstanding_balance': money_value(r['balance']), 'learners_with_balance': r['c'] or 0})
+        rows = safe_rows("SELECT method, COUNT(*) c, COALESCE(SUM(amount),0) total FROM payments WHERE status='Posted' GROUP BY method ORDER BY total DESC")
+        snap['finance']['payment_methods'] = [{'method': x['method'], 'count': x['c'], 'total': money_value(x['total'])} for x in rows]
+        if has_table('finance_ledger'):
+            rows = safe_rows('SELECT entry_type, COUNT(*) c, COALESCE(SUM(amount),0) total FROM finance_ledger GROUP BY entry_type')
+            snap['finance']['ledger'] = [{'type': x['entry_type'], 'count': x['c'], 'total': money_value(x['total'])} for x in rows]
 
     if role in {'Admin', 'ICT'}:
-        r = q('SELECT COUNT(*) c FROM notifications WHERE is_read=0', one=True); snap['operations']['unread_notifications'] = r['c'] or 0
-        r = q('SELECT COUNT(*) c FROM portal_messages', one=True); snap['operations']['portal_messages'] = r['c'] or 0
-        r = q('SELECT COUNT(*) c FROM library_items', one=True); snap['operations']['library_items'] = r['c'] or 0
-        r = q('SELECT COUNT(*) c FROM class_sessions', one=True); snap['operations']['online_classes'] = r['c'] or 0
-        rows = q("SELECT role, COUNT(*) c FROM users WHERE active=1 AND role!='System' GROUP BY role ORDER BY c DESC")
-        snap['people']['active_by_role'] = {x['role']: x['c'] for x in rows}
-        rows = q("SELECT action, COUNT(*) c FROM audit_log WHERE created_at >= datetime('now','-7 day') GROUP BY action ORDER BY c DESC LIMIT 15")
-        snap['activity']['audit_actions_7d'] = [{'action': x['action'], 'count': x['c']} for x in rows]
+        if has_table('notifications'):
+            r = safe_one('SELECT COUNT(*) c FROM notifications WHERE read_at IS NULL'); snap['operations']['unread_notifications'] = r['c'] if r else 0
+        if has_table('portal_messages'):
+            r = safe_one('SELECT COUNT(*) c FROM portal_messages'); snap['operations']['portal_messages'] = r['c'] if r else 0
+        if has_table('library_items'):
+            r = safe_one('SELECT COUNT(*) c FROM library_items'); snap['operations']['library_items'] = r['c'] if r else 0
+        if has_table('class_sessions'):
+            r = safe_one('SELECT COUNT(*) c FROM class_sessions'); snap['operations']['online_classes'] = r['c'] if r else 0
+        if has_table('users'):
+            rows = safe_rows("SELECT role, COUNT(*) c FROM users WHERE active=1 AND role!='System' GROUP BY role ORDER BY c DESC")
+            snap['people']['active_by_role'] = {x['role']: x['c'] for x in rows}
+        if has_table('audit_log'):
+            rows = safe_rows("SELECT action, COUNT(*) c FROM audit_log WHERE created_at >= datetime('now','-7 day') GROUP BY action ORDER BY c DESC LIMIT 15")
+            snap['activity']['audit_actions_7d'] = [{'action': x['action'], 'count': x['c']} for x in rows]
 
     return snap
-
 
 def _ai_sources(snapshot):
     names = {
@@ -4834,7 +4871,17 @@ def ai_ask():
     body=request.get_json(silent=True) or {}; prompt=(request.form.get('prompt') or body.get('prompt') or '').strip(); conversation_id=body.get('conversation_id')
     if not prompt:return jsonify({'error':'Enter a question.'}),400
     if len(prompt)>8000:return jsonify({'error':'Question is too long.'}),400
-    snapshot=_ai_institution_snapshot(user); sources=_ai_sources(snapshot); row=None
+    # Build the native context defensively. A partially migrated persistent DB must
+    # never take down Prime System AI as a whole.
+    try:
+        snapshot=_ai_institution_snapshot(user)
+    except Exception:
+        snapshot={
+            'institution': {'name': 'Prime Institution', 'currency': 'KES'},
+            'people': {}, 'academics': {}, 'attendance': {}, 'finance': {},
+            'operations': {}, 'activity': {}, 'scope': user.get('role','User')
+        }
+    sources=_ai_sources(snapshot); row=None
     if conversation_id:row=q('SELECT * FROM ai_conversations WHERE id=? AND user_id=?',(conversation_id,user['id']),one=True)
     if not row:
         execute('INSERT INTO ai_conversations(user_id,title,messages_json) VALUES(?,?,?)',(user['id'],prompt[:80],'[]')); conversation_id=q('SELECT last_insert_rowid() id',one=True)['id']; row=q('SELECT * FROM ai_conversations WHERE id=?',(conversation_id,),one=True)
@@ -4851,7 +4898,24 @@ def ai_ask():
         execute('INSERT INTO ai_usage_log(user_id,role,provider,model,prompt_preview,response_preview,status) VALUES(?,?,?,?,?,?,?)',(user['id'],user['role'],provider,model,prompt[:300],answer[:500],'Success'))
         return jsonify({'answer':answer,'conversation_id':conversation_id,'sources':sources,'engine':provider})
     except Exception as exc:
-        execute('INSERT INTO ai_usage_log(user_id,role,provider,model,prompt_preview,response_preview,status) VALUES(?,?,?,?,?,?,?)',(user['id'],user['role'],provider,model,prompt[:300],str(exc)[:500],'Failed'))
+        # Never expose a generic network-style failure for the native engine.
+        # Prime System AI should remain useful even when one auxiliary operation
+        # or optional conversation persistence step is unavailable.
+        if not use_external:
+            answer = (
+                "Prime System AI is online. One or more detailed institutional data sources are temporarily unavailable, "
+                "but the built-in engine is still running inside Prime. Try a narrower question such as "
+                "‘attendance’, ‘academic performance’, ‘finance’, or ‘how do I record a payment?’"
+            )
+            try:
+                execute('INSERT INTO ai_usage_log(user_id,role,provider,model,prompt_preview,response_preview,status) VALUES(?,?,?,?,?,?,?)',(user['id'],user['role'],'prime_system','Prime System AI',prompt[:300],answer[:500],'Degraded'))
+            except Exception:
+                pass
+            return jsonify({'answer':answer,'conversation_id':conversation_id,'sources':sources,'engine':'prime_system','degraded':True})
+        try:
+            execute('INSERT INTO ai_usage_log(user_id,role,provider,model,prompt_preview,response_preview,status) VALUES(?,?,?,?,?,?,?)',(user['id'],user['role'],provider,model,prompt[:300],str(exc)[:500],'Failed'))
+        except Exception:
+            pass
         return jsonify({'error':str(exc),'conversation_id':conversation_id,'engine':provider}),502
 
 @app.route('/admin/ai-settings', methods=['GET','POST'])
