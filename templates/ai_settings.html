@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>{{settings.school_name}} | AI Control Centre</title>
+<link rel="stylesheet" href="{{url_for('static',filename='css/style.css')}}">
+<style>
+.ai-settings-page{min-height:100vh;background:var(--bg,#0b1220);color:var(--text-color,#eef4ff);padding:28px}
+.ai-settings-wrap{width:min(980px,100%);margin:0 auto}
+.ai-settings-head{display:flex;align-items:center;gap:16px;margin-bottom:20px}
+.ai-settings-head .mark{width:46px;height:46px;border-radius:14px;display:grid;place-items:center;background:linear-gradient(135deg,#2f80ed,#6ea8ff);box-shadow:0 10px 30px rgba(47,128,237,.25);font-weight:800}
+.ai-settings-card{background:rgba(18,25,38,.82);border:1px solid rgba(255,255,255,.10);border-radius:20px;padding:24px;box-shadow:0 20px 70px rgba(0,0,0,.28)}
+.ai-setting-row{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:18px 0;border-top:1px solid rgba(255,255,255,.08)}
+.ai-setting-row:first-of-type{border-top:0}.ai-setting-row h3{margin:0 0 4px;font-size:16px}.ai-setting-row p{margin:0;color:var(--muted-text,#aab5c8);font-size:13px;max-width:650px;line-height:1.6}
+.ai-toggle{width:52px;height:30px;appearance:none;background:#344157;border-radius:999px;position:relative;cursor:pointer;flex:none}.ai-toggle:after{content:'';position:absolute;width:22px;height:22px;top:4px;left:4px;background:white;border-radius:50%;transition:.2s}.ai-toggle:checked{background:#2f80ed}.ai-toggle:checked:after{transform:translateX(22px)}
+.ai-select,.ai-input{min-width:220px;background:#111a2a;color:inherit;border:1px solid rgba(255,255,255,.12);border-radius:10px;padding:11px 12px}
+.ai-actions{display:flex;gap:10px;justify-content:flex-end;margin-top:20px}.ai-blue{background:#2f80ed!important;color:#fff!important;border:0!important}.ai-back{display:inline-flex;align-items:center;gap:8px;color:#9fc5ff;text-decoration:none;margin-bottom:14px}.ai-note{background:rgba(47,128,237,.08);border:1px solid rgba(47,128,237,.2);border-radius:14px;padding:14px;margin-top:18px;color:#cfe0ff;font-size:13px;line-height:1.6}
+@media(max-width:700px){.ai-settings-page{padding:14px}.ai-setting-row{align-items:flex-start}.ai-setting-row>div:last-child{width:auto}.ai-select,.ai-input{min-width:0;width:100%}.ai-setting-row{flex-direction:column}.ai-actions{flex-direction:column}.ai-actions a,.ai-actions button{width:100%}}
+</style></head>
+<body class="app-body"><main class="ai-settings-page"><div class="ai-settings-wrap">
+<a class="ai-back" href="/ai-assistant">← Back to Prime System AI</a>
+<div class="ai-settings-head"><div class="mark">P</div><div><div class="eyebrow">Institutional Intelligence</div><h1 style="margin:.15rem 0">AI Control Centre</h1><div class="muted">{{actor_name}} · {{role}}</div></div></div>
+<form class="ai-settings-card" method="post">
+<div class="ai-setting-row"><div><h3>Prime System AI</h3><p>This is the default engine. It runs inside Prime, reads authorized Prime data, and does not require OpenAI or another external service.</p></div><input class="ai-toggle" type="checkbox" name="system_ai_enabled" {% if settings.system_ai_enabled or settings.system_ai_enabled is not defined %}checked{% endif %}></div>
+<div class="ai-setting-row"><div><h3>Show optional external AI</h3><p>Hidden by default. Turn this on only when Admin or ICT wants the additional external engine to appear inside the AI workspace.</p></div><input class="ai-toggle" type="checkbox" name="external_ai_visible" {% if settings.external_ai_visible %}checked{% endif %}></div>
+<div class="ai-setting-row"><div><h3>Allow optional external AI</h3><p>Only meaningful when visibility is enabled. Prime System AI remains the first/default engine.</p></div><input class="ai-toggle" type="checkbox" name="external_ai_enabled" {% if settings.external_ai_enabled %}checked{% endif %}></div>
+<div class="ai-setting-row"><div><h3>External provider</h3><p>Used only for the optional external engine.</p></div><select class="ai-select" name="external_ai_provider"><option value="openai_responses" {% if settings.external_ai_provider=='openai_responses' %}selected{% endif %}>OpenAI Responses API</option><option value="openai_chat_completions" {% if settings.external_ai_provider=='openai_chat_completions' %}selected{% endif %}>OpenAI Chat Completions API</option></select></div>
+<div class="ai-setting-row"><div><h3>External model</h3><p>Keep the server API key in Render environment secrets; never put it into Prime pages.</p></div><input class="ai-input" name="external_ai_model" value="{{settings.external_ai_model or 'gpt-5.6'}}"></div>
+<div class="ai-note"><strong>Default state:</strong> Prime System AI is on. External AI is hidden and disabled. Users will never see an OpenAI warning while working with the built-in system AI.</div>
+<div class="ai-actions"><a class="btn btn-ghost" href="/ai-assistant">Cancel</a><button class="btn ai-blue" type="submit">Save AI controls</button></div>
+</form></div></main></body></html>
