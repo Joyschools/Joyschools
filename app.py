@@ -903,25 +903,19 @@ def admin_name():
 
 
 def is_admin():
-    return session.get("admin_authenticated") is True
+    # TM & S currently uses the private route itself as the admin doorway.
+    # No password, secret key, or admin-name login is required.
+    return True
 
 
 def require_admin():
-    if not is_admin():
-        abort(404)
+    # Admin tools are intentionally available through the private admin area for now.
+    return True
 
 
 @app.route("/promise21232425", methods=["GET", "POST"])
 def admin():
-    # One doorway: GET shows the single admin-name box; authenticated POST handles dashboard actions.
-    if not is_admin():
-        if request.method == "POST":
-            entered = request.form.get("admin_name", "").strip()
-            if entered and entered == admin_name():
-                session["admin_authenticated"] = True
-                return redirect(url_for("admin"))
-            return render_template("admin_login.html", error="That admin name does not match the name configured on Render."), 401
-        return render_template("admin_login.html", error=None)
+    # Direct admin dashboard. Visiting the private route opens the dashboard immediately.
     conn = db()
     if request.method == "POST":
         action = request.form.get("action")

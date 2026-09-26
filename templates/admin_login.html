@@ -1,14 +1,5 @@
 {% extends "base.html" %}
 {% block title %}Admin · {{ app_name }}{% endblock %}
 {% block content %}
-<section class="center-page">
-  <form class="admin-card" method="post">
-    <div class="eyebrow">PRIVATE ADMIN</div>
-    <h1>TM & S Admin</h1>
-    <p class="muted">Enter the admin name configured in Render.</p>
-    {% if error %}<div class="alert">{{ error }}</div>{% endif %}
-    <input class="field" name="admin_name" type="text" placeholder="Admin name" autocomplete="off" autofocus required>
-    <button class="btn primary full" type="submit">Open dashboard</button>
-  </form>
-</section>
+<section class="center-page"><div class="admin-card"><div class="eyebrow">PRIVATE ADMIN</div><h1>TM &amp; S Admin</h1><p class="muted">The admin login screen is disabled. Open the private admin URL directly.</p><a class="btn primary full" href="{{ url_for('admin') }}">Open dashboard</a></div></section>
 {% endblock %}
