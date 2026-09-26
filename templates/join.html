@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Join · {{ app_name }}{% endblock %}
+{% block content %}
+<section class="center-page">
+  <form class="admin-card join-card" method="post" id="join-form">
+    <div class="eyebrow">WELCOME</div>
+    <h1>Join {{ app_name }}</h1>
+    <p class="muted">Create your private viewer profile. Your phone identifies your profile; location is requested only with your permission.</p>
+    {% if error %}<div class="alert">{{ error }}</div>{% endif %}
+    <label class="stack-label">Name<input class="field" name="name" placeholder="Your name"></label>
+    <label class="stack-label">Phone number<input class="field" name="phone" required inputmode="tel" autocomplete="tel" placeholder="e.g. +254 7XX XXX XXX"></label>
+    <div class="location-box">
+      <strong>Location</strong>
+      <p id="location-status">Tap the button below to share your current location with the private admin dashboard.</p>
+      <button class="btn ghost" type="button" id="get-location">⌖ Share my location</button>
+    </div>
+    <input type="hidden" name="latitude" id="latitude">
+    <input type="hidden" name="longitude" id="longitude">
+    <input type="hidden" name="accuracy" id="accuracy">
+    <input type="hidden" name="location_consent" id="location-consent" value="0">
+    <button class="btn primary full" type="submit">Enter {{ app_name }}</button>
+    <p class="form-note">Location can be skipped. When shared, the dashboard records the coordinates and the browser's reported accuracy.</p>
+  </form>
+</section>
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+  const btn = document.getElementById('get-location');
+  const status = document.getElementById('location-status');
+  btn.addEventListener('click', () => {
+    if (!navigator.geolocation) { status.textContent = 'This browser does not provide location services.'; return; }
+    status.textContent = 'Requesting location permission…';
+    navigator.geolocation.getCurrentPosition(pos => {
+      document.getElementById('latitude').value = pos.coords.latitude;
+      document.getElementById('longitude').value = pos.coords.longitude;
+      document.getElementById('accuracy').value = pos.coords.accuracy;
+      document.getElementById('location-consent').value = '1';
+      status.textContent = `Location shared • accuracy about ${Math.round(pos.coords.accuracy)} m`;
+      btn.textContent = '✓ Location captured';
+    }, () => { status.textContent = 'Location permission was not granted. You can still join.'; }, {enableHighAccuracy:true, timeout:12000, maximumAge:0});
+  });
+});
+</script>
+{% endblock %}

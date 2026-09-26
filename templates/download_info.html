@@ -1,0 +1,3 @@
+{% extends "base.html" %}
+{% block title %}Download · {{ app_name }}{% endblock %}
+{% block content %}<section class="center-page"><div class="download-card"><div class="download-icon">↓</div><div class="eyebrow">DOWNLOAD</div><h1>{{ item['title'] }}</h1><p>This title is currently configured as a remote stream. Direct server-side download is enabled for media files stored in your own <code>media/</code> directory.</p><a class="btn primary" href="{{ url_for('watch', title_id=item['id'], episode=request.args.get('episode', type=int)) if item['kind']=='tv' else url_for('watch', title_id=item['id']) }}">▶ Return to player</a></div></section>{% endblock %}

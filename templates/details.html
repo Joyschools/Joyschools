@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}{{ item['title'] }} · {{ app_name }}{% endblock %}
+{% block content %}
+<section class="detail-hero" style="--detail-image: url('{{ item['backdrop'] or item['poster'] }}')">
+  <div class="detail-overlay"></div>
+  <div class="detail-content">
+    <div class="detail-poster"><img src="{{ item['poster'] }}" alt="{{ item['title'] }}"></div>
+    <div class="detail-copy">
+      <div class="eyebrow">{{ item['kind']|upper }}</div><h1>{{ item['title'] }}</h1>
+      <div class="meta"><span>{{ item['year'] or '—' }}</span>{% if item['duration'] %}<i>•</i><span>{{ item['duration'] }}</span>{% endif %}{% if item['rating'] %}<i>•</i><span>★ {{ item['rating'] }}</span>{% endif %}</div>
+      <p>{{ item['description'] or 'No description has been added yet.' }}</p>
+      <div class="chips">{% for g in item['genres'].split(',') if g.strip() %}<span>{{ g.strip() }}</span>{% endfor %}</div>
+      {% if item['kind']=='movie' %}<div class="hero-buttons"><a class="btn primary" href="{{ url_for('watch', title_id=item['id']) }}">▶ Watch now</a><a class="btn ghost" href="{{ url_for('download', title_id=item['id']) }}">↓ Download</a><button class="btn ghost" data-list data-id="{{ item['id'] }}">＋ My List</button></div>{% else %}<div class="hero-buttons"><a class="btn primary" href="{{ url_for('watch', title_id=item['id']) }}">▶ Play episode 1</a><button class="btn ghost" data-list data-id="{{ item['id'] }}">＋ My List</button></div>{% endif %}
+    </div>
+  </div>
+</section>
+
+{% if item['kind']=='tv' %}
+<section class="section episodes">
+  <div class="section-head"><h2>Episodes</h2><span class="muted">{{ episodes|length }} available</span></div>
+  {% if episodes %}
+    {% set current_season = namespace(value=0) %}
+    {% for ep in episodes %}
+      {% if ep['season'] != current_season.value %}
+        {% set current_season.value = ep['season'] %}
+        <h3 class="season-heading">Season {{ ep['season'] }}</h3>
+      {% endif %}
+      <div class="episode-row"><div class="ep-number">{{ '%02d'|format(ep['episode']) }}</div><div class="ep-copy"><strong>{{ ep['name'] }}</strong><span>{{ ep['duration'] }}</span></div><a class="ep-play" href="{{ url_for('watch', title_id=item['id'], episode=ep['id']) }}">▶</a><a class="ep-download" href="{{ url_for('download', title_id=item['id'], episode=ep['id']) }}">↓</a></div>
+    {% endfor %}
+  {% else %}<div class="empty compact"><h3>No episodes yet</h3><p>Add episode files through the manager or extend the catalogue API.</p></div>{% endif %}
+</section>
+{% endif %}
+
+<section class="section"><div class="section-head"><h2>You may also like</h2></div><div class="poster-grid">{% for s in similar %}<a class="poster-card" href="{{ url_for('details', title_id=s['id']) }}"><div class="poster-wrap"><img src="{{ s['poster'] }}" alt="{{ s['title'] }}"></div><div class="poster-title">{{ s['title'] }}</div><div class="poster-meta">{{ s['year'] or '' }}{% if s['rating'] %} · ★ {{ s['rating'] }}{% endif %}</div></a>{% endfor %}</div></section>
+{% endblock %}

@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block title %}Admin Dashboard · {{ app_name }}{% endblock %}
+{% block content %}
+<section class="page-head admin-head">
+  <div><div class="eyebrow">PRIVATE CONTROL ROOM</div><h1>{{ app_name }} Admin</h1><p class="muted">Catalogue, users, API connections and playback settings in one place.</p></div>
+  <div class="admin-actions"><a class="text-link" href="{{ url_for('home') }}">View site →</a><a class="text-link" href="{{ url_for('admin_logout') }}">Logout</a></div>
+</section>
+
+<section class="section admin-stats">
+  <div class="stat-card"><span>Members</span><strong>{{ user_count }}</strong><small>people who joined</small></div>
+  <div class="stat-card"><span>Active API</span><strong>{{ active_api_count }}</strong><small>manually connected</small></div>
+  <div class="stat-card"><span>Catalogue</span><strong>{{ items|length }}</strong><small>titles in TM & S</small></div>
+  <div class="stat-card"><span>System errors</span><strong>{{ error_count }}</strong><small>recorded faults</small></div>
+</section>
+
+<section class="section">
+  <div class="section-head"><h2>Member join records</h2><a class="btn ghost small" href="{{ url_for('users_csv') }}">↓ Export CSV</a></div>
+  <div class="admin-table-wrap">
+    <table class="admin-table"><thead><tr><th>Name</th><th>Phone</th><th>Location</th><th>Accuracy</th><th>Joined</th><th>Last seen</th></tr></thead>
+    <tbody>{% for user in users %}<tr><td><strong>{{ user['name'] or 'Unnamed member' }}</strong><small>#{{ user['id'] }}</small></td><td>{{ user['phone'] }}</td><td>{% if user['latitude'] is not none and user['longitude'] is not none %}<a class="map-link" target="_blank" rel="noopener" href="https://www.google.com/maps?q={{ user['latitude'] }},{{ user['longitude'] }}">{{ '%.6f'|format(user['latitude']) }}, {{ '%.6f'|format(user['longitude']) }}</a>{% else %}<span class="muted">Not shared</span>{% endif %}</td><td>{% if user['accuracy_m'] is not none %}±{{ '%.0f'|format(user['accuracy_m']) }} m{% else %}—{% endif %}</td><td>{{ user['joined_at'] }}</td><td>{{ user['last_seen'] }}</td></tr>{% else %}<tr><td colspan="6" class="empty-table">No one has joined yet. Your Join page is ready.</td></tr>{% endfor %}</tbody></table>
+  </div>
+  <p class="form-note">Location is only stored when the member grants browser location permission. Coordinates and phone numbers are shown here only in the private admin dashboard.</p>
+</section>
+
+<section class="section">
+  <div class="section-head"><div><h2>API & Integrations</h2><p class="muted">You supply the connection. TM & S supplies the repetitive wiring and uses the saved active API for searches and playback.</p></div></div>
+  {% if api_error %}<div class="alert">{{ api_error }}</div>{% endif %}
+  <form class="manager-form api-form" method="post">
+    <input type="hidden" name="action" value="save_api">
+    <div class="api-quick-grid">
+      <label><span>API name <b class="field-badge manual">You enter</b></span><input name="name" placeholder="My Movie API" required></label>
+      <label><span>Base URL <b class="field-badge manual">You enter</b></span><input name="base_url" placeholder="https://api.example.com" required></label>
+      <label class="span-2"><span>Headers / Auth JSON <b class="field-badge manual">Only if required</b></span><textarea name="headers_json" rows="3" placeholder='{"Authorization":"Bearer YOUR_TOKEN"}'></textarea></label>
+    </div>
+    <div class="api-auto-note"><div class="feature-icon">✦</div><div><strong>TM & S automatic defaults</strong><p>When you leave the advanced fields empty, TM & S fills common REST JSON paths such as <code>/search</code>, <code>/info/{id}</code>, <code>/seasons/{id}</code>, <code>/episodes/{id}</code>, <code>/stream/{id}</code>, and the usual <code>id/title/poster/year/url</code> mappings. You can override any of them below.</p></div></div>
+    <details class="api-advanced"><summary>Advanced API mapping <span>Open only when your API needs custom paths or JSON fields</span></summary>
+      <div class="form-grid api-grid">
+        <label>Search path<input name="search_path" placeholder="/search"></label>
+        <label>Search query parameter<input name="search_param" placeholder="query"></label>
+        <label>Info path<input name="info_path" placeholder="/info/{id}"></label>
+        <label>Seasons path<input name="seasons_path" placeholder="/seasons/{id}"></label>
+        <label>Episodes path<input name="episodes_path" placeholder="/episodes/{id}"></label>
+        <label>Sources / stream path<input name="stream_path" placeholder="/stream/{id}"></label>
+        <label>Download path<input name="download_path" placeholder="/dl/{id}"></label>
+        <label>Subtitles path<input name="subtitles_path" placeholder="/subtitles/{id}"></label>
+        <label>Results array path<input name="search_results_path" placeholder="results or data.items"></label>
+        <label>ID field<input name="id_key" placeholder="id or subjectId"></label>
+        <label>Title / name field<input name="title_key" placeholder="title or name"></label>
+        <label>Poster field<input name="poster_key" placeholder="poster"></label>
+        <label>Backdrop field<input name="backdrop_key" placeholder="backdrop"></label>
+        <label>Year field<input name="year_key" placeholder="year"></label>
+        <label>Type field<input name="type_key" placeholder="type"></label>
+        <label>Description field<input name="description_key" placeholder="description"></label>
+        <label>Stream URL field/path<input name="stream_url_key" placeholder="url or data.url"></label>
+      </div>
+    </details>
+    <label class="toggle-label"><input type="checkbox" name="active" value="1"> Save and connect this API now</label>
+    <div class="hero-buttons"><button class="btn primary" type="submit">＋ Save API configuration</button><a class="btn ghost" href="{{ url_for('api_library') }}">Open API Library</a></div>
+    <p class="form-note">Nothing connects until you save it. Saved API credentials/configuration remain private to the admin area. Use <code>{id}</code> where the provider expects the selected title ID.</p>
+  </form>
+
+  <div class="api-config-list">
+    {% for api in apis %}
+    <div class="api-config-card {% if api['active'] %}connected{% endif %}">
+      <div><div class="eyebrow">{% if api['active'] %}ACTIVE · USED BY SITE SEARCH{% else %}SAVED{% endif %}</div><h3>{{ api['name'] }}</h3><p>{{ api['base_url'] }}</p><small>Search: {{ api['search_path'] or '/search' }} · Stream: {{ api['stream_path'] or '/stream/{id}' }}</small></div>
+      <div class="api-card-actions">{% if not api['active'] %}<form method="post"><input type="hidden" name="action" value="activate_api"><input type="hidden" name="api_id" value="{{ api['id'] }}"><button class="btn ghost small" type="submit">Activate</button></form>{% else %}<a class="btn primary small" href="{{ url_for('api_library') }}">Search API</a>{% endif %}<form method="post" onsubmit="return confirm('Delete this saved API configuration?')"><input type="hidden" name="action" value="delete_api"><input type="hidden" name="api_id" value="{{ api['id'] }}"><button class="danger-btn" type="submit">Delete</button></form></div>
+    </div>
+    {% else %}<div class="api-empty"><strong>No API configurations saved.</strong><span>Enter the API connection details above. Common routes and mappings will be supplied automatically when you leave them blank.</span></div>{% endfor %}
+  </div>
+</section>
+
+<section class="section">
+  <div class="section-head"><div><h2>System errors</h2><p class="muted">Application, HTTP, API search and API playback faults are recorded with a request ID so you can diagnose failures after deployment.</p></div>{% if errors %}<form method="post"><input type="hidden" name="action" value="clear_errors"><button class="btn ghost small" type="submit" onclick="return confirm('Clear all recorded system errors?')">Clear errors</button></form>{% endif %}</div>
+  <div class="admin-table-wrap">
+    <table class="admin-table error-table"><thead><tr><th>Time</th><th>Severity</th><th>Source</th><th>Type</th><th>Message</th><th>Route</th><th>Status</th><th>Request ID</th></tr></thead>
+    <tbody>{% for err in errors %}<tr><td>{{ err['created_at'] }}</td><td><span class="severity {{ err['severity']|lower }}">{{ err['severity'] }}</span></td><td>{{ err['source'] }}</td><td>{{ err['error_type'] }}</td><td class="error-message">{{ err['message'] }}</td><td>{{ err['route'] }}</td><td>{{ err['status'] }}</td><td>{{ err['request_id'] or '—' }}</td></tr>{% else %}<tr><td colspan="8" class="empty-table">No system errors have been recorded.</td></tr>{% endfor %}</tbody></table>
+  </div>
+</section>
+
+<section class="section"><form class="manager-form" method="post" enctype="multipart/form-data"><input type="hidden" name="action" value="add"><div class="section-head"><div><h2>Add authorised media</h2><p class="muted">Local files or remote sources you are authorized to use.</p></div></div><div class="form-grid"><label>Title<input name="title" required placeholder="Movie or show name"></label><label>Type<select name="kind"><option value="movie">Movie</option><option value="tv">TV Show</option></select></label><label>Year<input name="year" type="number" min="1888" max="2200" placeholder="2026"></label><label>Genres<input name="genres" placeholder="Action, Drama"></label><label class="span-2">Description<textarea name="description" rows="4" placeholder="A short description..."></textarea></label><label>Source<select name="source_type" id="source-type"><option value="local">Local server file</option><option value="remote">Remote authorized URL</option></select></label><label>Video file<input name="media" type="file" accept="video/*"></label><label class="span-2">Remote URL<input name="source_url" placeholder="https://example.com/authorized-stream.mp4"></label></div><button class="btn primary" type="submit">＋ Add to catalogue</button></form>
+</section>
+
+<section class="section"><div class="section-head"><h2>Current catalogue</h2><span class="muted">{{ items|length }} titles</span></div><div class="admin-list">{% for item in items %}<div class="admin-row"><img src="{{ item['poster'] }}" alt=""><div class="admin-info"><strong>{{ item['title'] }}</strong><span>{{ item['kind'] }} · {{ item['source_type'] }}{% if item['local_file'] %} · {{ item['local_file'] }}{% endif %}</span></div><a class="text-link" href="{{ url_for('details', title_id=item['id']) }}">Open</a><form method="post" action="{{ url_for('admin_delete', title_id=item['id']) }}"><button class="danger-btn" onclick="return confirm('Delete this title?')">Delete</button></form></div>{% endfor %}</div></section>
+{% endblock %}

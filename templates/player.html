@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Watching {{ item['title'] }} · {{ app_name }}{% endblock %}
+{% block content %}
+<section class="player-page">
+  <div class="player-top"><a class="back-link" href="{{ url_for('details', title_id=item['id']) }}">← Back to details</a><div class="player-title"><span>{{ item['title'] }}</span>{% if episode %}<em>· S{{ episode['season'] }} E{{ episode['episode'] }} — {{ episode['name'] }}</em>{% endif %}</div></div>
+  {% if error %}<div class="player-error">{{ error }}</div>{% elif stream_url %}
+  <div class="video-shell"><video id="video" controls playsinline preload="metadata" poster="{{ item['backdrop'] or item['poster'] }}"><source src="{{ stream_url }}"></video><div class="video-fade"></div></div>
+  <div class="player-controls"><a class="btn ghost" href="{{ url_for('details', title_id=item['id']) }}">Details</a>{% if item['kind']=='movie' %}<a class="btn ghost" href="{{ url_for('download', title_id=item['id']) }}">↓ Download</a>{% elif episode %}<a class="btn ghost" href="{{ url_for('download', title_id=item['id'], episode=episode['id']) }}">↓ Download episode</a>{% endif %}</div>
+  <p class="player-note">Playback source is configured by your catalogue. For production, use media you are authorized to stream.</p>
+  {% endif %}
+</section>
+{% endblock %}
