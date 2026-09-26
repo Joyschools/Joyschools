@@ -32,7 +32,7 @@
       <label><span>Base URL <b class="field-badge manual">You enter</b></span><input name="base_url" placeholder="https://api.example.com" required></label>
       <label class="span-2"><span>Headers / Auth JSON <b class="field-badge manual">Only if required</b></span><textarea name="headers_json" rows="3" placeholder='{"Authorization":"Bearer YOUR_TOKEN"}'></textarea></label>
     </div>
-    <div class="api-auto-note"><div class="feature-icon">✦</div><div><strong>TM & S automatic defaults</strong><p>When you leave the advanced fields empty, TM & S fills common REST JSON paths such as <code>/search</code>, <code>/info/{id}</code>, <code>/seasons/{id}</code>, <code>/episodes/{id}</code>, <code>/stream/{id}</code>, and the usual <code>id/title/poster/year/url</code> mappings. You can override any of them below.</p></div></div>
+    <div class="api-auto-note"><div class="feature-icon">✦</div><div><strong>TM & S automatic defaults</strong><p>Leave Advanced blank to use TM & S defaults. TM & S also retries common search formats and playback routes when a provider uses a slightly different REST shape.</p></div></div>
     <details class="api-advanced"><summary>Advanced API mapping <span>Open only when your API needs custom paths or JSON fields</span></summary>
       <div class="form-grid api-grid">
         <label>Search path<input name="search_path" placeholder="/search"></label>
@@ -54,7 +54,7 @@
         <label>Stream URL field/path<input name="stream_url_key" placeholder="url or data.url"></label>
       </div>
     </details>
-    <label class="toggle-label"><input type="checkbox" name="active" value="1"> Save and connect this API now</label>
+    <label class="toggle-label"><input type="checkbox" name="active" value="1" checked> Save and connect this API now</label>
     <div class="hero-buttons"><button class="btn primary" type="submit">＋ Save API configuration</button><a class="btn ghost" href="{{ url_for('api_library') }}">Open API Library</a></div>
     <p class="form-note">Nothing connects until you save it. Saved API credentials/configuration remain private to the admin area. Use <code>{id}</code> where the provider expects the selected title ID.</p>
     <div class="api-hint"><strong>API base you mentioned</strong><code>https://moviebox-api-eight.vercel.app</code><span>Paste it manually in Base URL. TM & S will use its compatible search/info/seasons/sources/download defaults.</span></div>

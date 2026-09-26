@@ -326,8 +326,7 @@ def browse():
     cfg = active_api()
     if query and cfg:
         try:
-            raw = api_get(cfg, cfg["search_path"], {cfg["search_param"] or "query": query})
-            api_results = normalize_api_result(cfg, raw)
+            api_results = provider_search(cfg, query)
             if kind in {"movie", "tv"}:
                 api_results = [r for r in api_results if r["kind"] == kind]
         except Exception as exc:
@@ -519,13 +518,12 @@ def get_home_discover():
 # ----------------------- Generic authorized API connector -----------------------
 
 API_DEFAULTS = {
-    # These defaults also match the MovieBox wrapper the user can enter manually.
     "search_path": "/search",
     "info_path": "/info/{id}",
     "seasons_path": "/seasons/{id}",
     "episodes_path": "/episodes/{id}/{se}",
-    "stream_path": "/sources/{id}/{se}/{ep}",
-    "download_path": "/download/{id}/{se}",
+    "stream_path": "/stream/{id}",
+    "download_path": "/download/{id}",
     "subtitles_path": "/captions/ext/{id}/{resourceId}/{ep}",
     "search_param": "q",
     "headers_json": "{}",
@@ -619,52 +617,58 @@ def normalize_kind(value):
         return "tv"
     return "tv" if "tv" in text or "series" in text else "movie"
 
+def _mapped_value(item, configured_key, fallbacks):
+    value = json_path(item, configured_key) if configured_key else None
+    if value not in (None, ""):
+        return value
+    return first_value(item, fallbacks)
+
+
 def normalize_api_result(cfg, raw):
-    configured = json_path(raw, cfg["search_results_path"])
+    configured = json_path(raw, cfg["search_results_path"]) if cfg["search_results_path"] else None
     results = configured
     if results is None:
         results = raw.get("results") if isinstance(raw, dict) else None
     if results is None and isinstance(raw, dict):
         for key in ("data", "items", "list", "movies", "shows", "series", "subjects", "results"):
-            if isinstance(raw.get(key), list):
-                results = raw[key]
+            value = raw.get(key)
+            if isinstance(value, list):
+                results = value
                 break
         if results is None:
             for parent in ("data", "result", "response"):
                 child = raw.get(parent)
                 if isinstance(child, dict):
                     for key in ("items", "movies", "shows", "series", "subjects", "results"):
-                        if isinstance(child.get(key), list):
-                            results = child[key]
+                        value = child.get(key)
+                        if isinstance(value, list):
+                            results = value
                             break
                 if results is not None:
                     break
     if not isinstance(results, list):
-        if isinstance(raw, list):
-            results = raw
-        else:
-            results = []
+        results = raw if isinstance(raw, list) else []
+
     output = []
     for item in results:
         if not isinstance(item, dict):
             continue
-        title = json_path(item, cfg["title_key"]) if cfg["title_key"] else first_value(item, ["title", "name", "original_title", "subjectName"])
-        external_id = json_path(item, cfg["id_key"]) if cfg["id_key"] else first_value(item, ["id", "subjectId", "subject_id", "tmdb_id"])
-        poster = json_path(item, cfg["poster_key"]) if cfg["poster_key"] else first_value(item, ["poster", "posterUrl", "poster_path", "image", "cover", "coverUrl", "imageUrl"])
-        backdrop = json_path(item, cfg["backdrop_key"]) if cfg["backdrop_key"] else first_value(item, ["backdrop", "backdropUrl", "backdrop_path", "background", "backgroundUrl", "backdrop_url"])
-        year = json_path(item, cfg["year_key"]) if cfg["year_key"] else first_value(item, ["year", "releaseYear", "release_date"])
-        kind = json_path(item, cfg["type_key"]) if cfg["type_key"] else first_value(item, ["type", "kind", "media_type"])
-        description = json_path(item, cfg["description_key"]) if cfg["description_key"] else first_value(item, ["description", "overview", "plot", "synopsis"])
+        external_id = _mapped_value(item, cfg["id_key"], ["id", "subjectId", "subject_id", "movieId", "showId", "tmdb_id", "imdb_id"])
+        title = _mapped_value(item, cfg["title_key"], ["title", "name", "original_title", "subjectName", "subjectTitle"])
+        poster = _mapped_value(item, cfg["poster_key"], ["poster", "posterUrl", "poster_path", "image", "cover", "coverUrl", "imageUrl"])
+        backdrop = _mapped_value(item, cfg["backdrop_key"], ["backdrop", "backdropUrl", "backdrop_path", "background", "backgroundUrl", "backdrop_url", "backdropUrl"])
+        year = _mapped_value(item, cfg["year_key"], ["year", "releaseYear", "release_date", "releaseDate"])
+        kind = _mapped_value(item, cfg["type_key"], ["type", "kind", "media_type", "subjectType", "subject_type"])
+        description = _mapped_value(item, cfg["description_key"], ["description", "overview", "plot", "synopsis", "desc"])
         if not title or external_id is None:
             continue
-        kind_text = normalize_kind(kind)
         output.append({
             "id": str(external_id),
             "title": str(title),
             "poster": poster or "/static/posters/blaze.svg",
             "backdrop": backdrop or poster or "/static/posters/blaze.svg",
             "year": str(year or ""),
-            "kind": kind_text,
+            "kind": normalize_kind(kind),
             "description": str(description or ""),
         })
     return output
@@ -703,6 +707,105 @@ def stream_value(cfg, raw):
     return raw if isinstance(raw, str) else None
 
 
+
+def api_json_request(cfg, path, method="GET", params=None, payload=None):
+    url = api_url(cfg, path)
+    headers = api_headers(cfg)
+    if method.upper() == "POST":
+        response = requests.post(url, headers=headers, params=params or {}, json=payload or {}, timeout=15)
+    else:
+        response = requests.get(url, headers=headers, params=params or {}, timeout=15)
+    response.raise_for_status()
+    return response.json()
+
+
+def provider_search(cfg, query):
+    if not cfg:
+        return []
+    errors = []
+    configured_param = (cfg["search_param"] or "q").strip()
+    attempts = [("GET", {configured_param: query}, None)]
+    # Common public wrappers vary between q/query/keyword and GET/POST.
+    for alt in ("q", "query", "keyword"):
+        if alt != configured_param:
+            attempts.append(("GET", {alt: query}, None))
+    attempts.append(("POST", {}, {"keyword": query, "q": query, "query": query}))
+    seen = set()
+    for method, params, payload in attempts:
+        signature = (method, tuple(sorted(params.items())))
+        if signature in seen:
+            continue
+        seen.add(signature)
+        try:
+            raw = api_json_request(cfg, cfg["search_path"] or "/search", method=method, params=params, payload=payload)
+            results = normalize_api_result(cfg, raw)
+            if results:
+                return results
+        except requests.RequestException as exc:
+            errors.append(str(exc))
+        except Exception as exc:
+            errors.append(str(exc))
+    if errors:
+        raise RuntimeError("; ".join(errors[:2]))
+    return []
+
+
+def resolve_provider_id(cfg, title, kind, year=""):
+    if not cfg or not title:
+        return "", ""
+    matches = provider_search(cfg, title)
+    same_kind = [m for m in matches if m.get("kind") == kind]
+    chosen = match_provider_title(title, same_kind or matches, year)
+    if chosen:
+        return chosen["id"], chosen["title"]
+    return "", ""
+
+
+def stream_request_candidates(cfg, playback_id, kind, season="", episode=""):
+    candidates = []
+    se = str(season or "0" if kind == "movie" else season or "")
+    ep = str(episode or "0" if kind == "movie" else episode or "")
+    configured = (cfg["stream_path"] or "").strip()
+    if configured:
+        # Never leave template tokens in a real URL. Movies use 0/0 for wrappers that
+        # model movies through a season/episode-compatible resource endpoint.
+        path = configured
+        replacements = {
+            "id": playback_id, "external_id": playback_id,
+            "se": se, "season": se, "ep": ep, "episode": ep,
+        }
+        for key, value in replacements.items():
+            encoded = quote(str(value), safe="")
+            path = path.replace("{" + key + "}", encoded).replace(":" + key, encoded)
+        if "{" not in path and "}" not in path:
+            params = {}
+            if "{se}" not in configured and "{season}" not in configured:
+                params["se"] = se if kind == "movie" or season else season
+            if "{ep}" not in configured and "{episode}" not in configured:
+                params["ep"] = ep if kind == "movie" or episode else episode
+            candidates.append((path, params))
+    # Common alternatives when the configured API exposes /stream instead of /sources.
+    if kind == "movie":
+        candidates.extend([
+            (api_url(cfg, "/stream/{id}", id=playback_id), {"se": "0", "ep": "0"}),
+            (api_url(cfg, "/sources/{id}/0/0", id=playback_id), {}),
+            (api_url(cfg, "/stream/{id}", id=playback_id), {}),
+        ])
+    else:
+        if season and episode:
+            candidates.extend([
+                (api_url(cfg, "/stream/{id}", id=playback_id), {"se": season, "ep": episode}),
+                (api_url(cfg, "/sources/{id}/{se}/{ep}", id=playback_id, se=season, ep=episode), {}),
+            ])
+    deduped=[]
+    seen=set()
+    for url, params in candidates:
+        key=(url, tuple(sorted((params or {}).items())))
+        if key not in seen:
+            seen.add(key); deduped.append((url, params))
+    return deduped
+
+
 @app.route("/api-library")
 def api_library():
     require_admin()
@@ -712,8 +815,7 @@ def api_library():
     error = None
     if q and cfg:
         try:
-            raw = api_get(cfg, cfg["search_path"], {cfg["search_param"] or "query": q})
-            results = normalize_api_result(cfg, raw)
+            results = provider_search(cfg, q)
         except Exception as exc:
             error = f"API request failed: {exc}"
             log_system_error(exc, source="api-library", error_type=type(exc).__name__, status=502)
@@ -773,6 +875,82 @@ def match_provider_title(query_title, provider_results, year=""):
             best_score=score; best=candidate
     return best if best_score >= 0.62 else None
 
+def normalize_provider_detail(cfg, raw, fallback_id="", fallback_kind="movie", fallback_title=""):
+    if not isinstance(raw, dict):
+        return {"id": fallback_id, "title": fallback_title or fallback_id, "poster": "/static/posters/series.svg" if fallback_kind == "tv" else "/static/posters/blaze.svg", "backdrop": "/static/posters/series.svg" if fallback_kind == "tv" else "/static/posters/blaze.svg", "year": "", "kind": fallback_kind, "description": "", "rating": ""}
+    # Some APIs wrap detail data under data/result/item.
+    data = raw
+    for key in ("data", "result", "item", "subject"):
+        if isinstance(data.get(key), dict):
+            data = data[key]
+            break
+    item = normalize_api_result(cfg, {"results": [data]})
+    if item:
+        value = item[0]
+        value["rating"] = str(_mapped_value(data, "rating", ["rating", "score", "imdbRating"]) or "")
+        return value
+    return {"id": fallback_id, "title": fallback_title or fallback_id, "poster": "/static/posters/series.svg" if fallback_kind == "tv" else "/static/posters/blaze.svg", "backdrop": "/static/posters/series.svg" if fallback_kind == "tv" else "/static/posters/blaze.svg", "year": "", "kind": fallback_kind, "description": "", "rating": ""}
+
+
+def provider_episodes(cfg, provider_id):
+    if not cfg or not provider_id:
+        return []
+    paths=[]
+    if cfg["seasons_path"]:
+        paths.append(cfg["seasons_path"])
+    paths.append("/season/{id}")
+    for template in paths:
+        try:
+            path=api_url(cfg, template, id=provider_id, external_id=provider_id)
+            response=requests.get(path, headers=api_headers(cfg), timeout=15)
+            response.raise_for_status()
+            found=extract_provider_episodes(response.json())
+            if found:
+                return found
+        except Exception:
+            continue
+    if cfg["episodes_path"]:
+        out=[]
+        for season_no in range(1,13):
+            try:
+                path=api_url(cfg,cfg["episodes_path"],id=provider_id,external_id=provider_id,se=season_no,season=season_no)
+                response=requests.get(path,headers=api_headers(cfg),params={"page":1,"perPage":50},timeout=12)
+                if response.status_code==404:
+                    if season_no>1: break
+                    continue
+                response.raise_for_status()
+                found=extract_provider_episodes(response.json(),default_season=season_no)
+                out.extend(found)
+                if not found and season_no>1: break
+            except Exception:
+                if season_no>1: break
+        return sorted({(x["season"],x["episode"]):x for x in out}.values(), key=lambda x:(x["season"],x["episode"]))
+    return []
+
+
+@app.route("/provider/<kind>/<path:provider_id>")
+def provider_details(kind, provider_id):
+    if kind not in {"movie", "tv"}:
+        abort(404)
+    cfg=active_api()
+    if not cfg:
+        return redirect(url_for("browse"))
+    title_hint=request.args.get("title", "").strip()
+    try:
+        provider_info=None
+        if cfg["info_path"]:
+            path=api_url(cfg,cfg["info_path"],id=provider_id,external_id=provider_id)
+            response=requests.get(path,headers=api_headers(cfg),timeout=15)
+            response.raise_for_status()
+            provider_info=response.json()
+        item=normalize_provider_detail(cfg,provider_info or {"id":provider_id,"title":title_hint},provider_id,kind,title_hint)
+        episodes=provider_episodes(cfg,provider_id) if kind=="tv" else []
+        return render_template("external_details.html",item=item,cfg=cfg,provider_info=provider_info,info_error=None,episodes=episodes,external_id=provider_id,provider_id=provider_id,provider_title=item.get("title",title_hint))
+    except Exception as exc:
+        log_system_error(exc,source="playback-api-provider-detail",error_type=type(exc).__name__,status=502)
+        fallback={"id":provider_id,"title":title_hint or "Title unavailable","description":"","poster":"/static/posters/series.svg" if kind=="tv" else "/static/posters/blaze.svg","backdrop":"/static/posters/series.svg" if kind=="tv" else "/static/posters/blaze.svg","kind":kind,"year":"","rating":""}
+        return render_template("external_details.html",item=fallback,cfg=cfg,provider_info=None,info_error=f"Provider details failed: {exc}. Request ID: {getattr(g,'request_id','')}",episodes=[],external_id=provider_id,provider_id=provider_id,provider_title=title_hint),502
+
 @app.route("/external/<kind>/<path:external_id>")
 def external_details(kind, external_id):
     if kind not in {"movie", "tv"}:
@@ -794,38 +972,17 @@ def external_details(kind, external_id):
         provider_title = ""
         if cfg and not provider_id and cfg["search_path"]:
             try:
-                provider_raw = api_get(cfg, cfg["search_path"], {cfg["search_param"] or "q": item["title"]})
-                provider_matches = [m for m in normalize_api_result(cfg, provider_raw) if m["kind"] == kind]
-                chosen = match_provider_title(item["title"], provider_matches, item.get("year", ""))
-                if chosen:
-                    provider_id = chosen["id"]
-                    provider_title = chosen["title"]
+                provider_id, provider_title = resolve_provider_id(cfg, item["title"], kind, item.get("year", ""))
+                if not provider_id:
+                    info_error = "Playback API is connected, but this title was not matched in the provider search."
             except Exception as exc:
                 info_error = "Playback source could not match this title yet."
                 log_system_error(exc, source="playback-api-match", error_type=type(exc).__name__, status=502, severity="WARNING")
         if kind == "tv":
             # Prefer the playback provider's actual seasons/episodes so the selected
             # provider ID and episode numbering stay in sync. Fall back to metadata.
-            if cfg and provider_id and cfg["seasons_path"]:
-                try:
-                    season_raw = api_get(cfg, cfg["seasons_path"], {}) if "{id}" not in cfg["seasons_path"] else api_get(cfg, cfg["seasons_path"], {})
-                    episodes = extract_provider_episodes(season_raw)
-                except Exception as exc:
-                    log_system_error(exc, source="playback-api-seasons", error_type=type(exc).__name__, status=502, severity="WARNING")
-            if not episodes and cfg and provider_id and cfg["episodes_path"]:
-                for season_no in range(1, 13):
-                    try:
-                        path = api_url(cfg, cfg["episodes_path"], id=provider_id, external_id=provider_id, se=season_no, season=season_no)
-                        raw_eps = requests.get(path, headers=api_headers(cfg), params={"page":1,"perPage":50}, timeout=12)
-                        if raw_eps.status_code == 404:
-                            if season_no > 1: break
-                            continue
-                        raw_eps.raise_for_status()
-                        found = extract_provider_episodes(raw_eps.json(), default_season=season_no)
-                        episodes.extend(found)
-                        if not found and season_no > 1: break
-                    except Exception:
-                        if season_no > 1: break
+            if cfg and provider_id:
+                episodes = provider_episodes(cfg, provider_id)
             if not episodes and isinstance(raw_meta, dict):
                 for video in raw_meta.get("videos") or []:
                     if not isinstance(video, dict):
@@ -872,21 +1029,43 @@ def external_watch(kind, external_id):
     cfg = active_api()
     if not cfg or not cfg["stream_path"]:
         return render_template("external_player.html", item={"title": request.args.get("title", "TM & S title"), "description": ""}, stream_url=None, error="No playback API is active. Add one in the Admin area first."), 400
-    season = request.args.get("season", "")
-    episode = request.args.get("episode", "")
+
+    season = request.args.get("season", "").strip()
+    episode = request.args.get("episode", "").strip()
+    display_title = request.args.get("title", external_id).strip() or external_id
     try:
-        playback_id = request.args.get("provider_id", "").strip() or external_id
-        path = api_url(cfg, cfg["stream_path"], id=playback_id, external_id=playback_id, season=season, episode=episode)
-        response = requests.get(path, headers=api_headers(cfg), timeout=15)
-        response.raise_for_status()
-        raw = response.json()
-        stream = stream_value(cfg, raw)
-        if not stream:
-            raise ValueError("The configured playback API did not return a recognizable playable URL. Review Stream URL mapping in Admin.")
-        display_title = request.args.get("title", external_id)
-        return render_template("external_player.html", item={"title": display_title, "description": "Playback from the configured provider."}, stream_url=stream, error=None)
+        # A metadata identifier such as tt123... is not necessarily the playback
+        # provider's identifier. Resolve it from the provider before attempting playback.
+        playback_id = request.args.get("provider_id", "").strip()
+        if not playback_id:
+            playback_id, matched_title = resolve_provider_id(cfg, display_title.split(" · ")[0], kind)
+            if matched_title:
+                display_title = display_title.replace(display_title.split(" · ")[0], matched_title, 1)
+        if not playback_id:
+            raise ValueError("The active API could not find a provider ID for this title. Check API search settings in Admin.")
+
+        candidates = stream_request_candidates(cfg, playback_id, kind, season, episode)
+        if not candidates:
+            raise ValueError("No playback route is available for this title.")
+        last_error = None
+        raw = None
+        for url, params in candidates:
+            try:
+                response = requests.get(url, headers=api_headers(cfg), params=params or {}, timeout=15)
+                response.raise_for_status()
+                raw = response.json()
+                stream = stream_value(cfg, raw)
+                if stream:
+                    return render_template("external_player.html", item={"title": display_title, "description": "Playback from the configured provider."}, stream_url=stream, error=None)
+                last_error = ValueError(f"Provider returned no playable URL from {response.url}")
+            except requests.RequestException as exc:
+                last_error = exc
+            except ValueError as exc:
+                last_error = exc
+        if last_error:
+            raise last_error
+        raise ValueError("The configured playback API did not return a recognizable playable URL.")
     except Exception as exc:
-        display_title = request.args.get("title", external_id)
         log_system_error(exc, source="playback-api-stream", error_type=type(exc).__name__, status=502)
         return render_template("external_player.html", item={"title": display_title, "description": ""}, stream_url=None, error=f"Playback failed: {exc}. Request ID: {getattr(g, 'request_id', '')}"), 502
 
