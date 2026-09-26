@@ -2,6 +2,7 @@ import json
 import os
 import re
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote, urljoin
@@ -131,6 +132,12 @@ def init_db():
             status INTEGER DEFAULT 500,
             request_id TEXT DEFAULT ''
         );
+
+        CREATE TABLE IF NOT EXISTS metadata_cache (
+            cache_key TEXT PRIMARY KEY,
+            payload_json TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
         """
     )
     conn.commit()
@@ -218,11 +225,11 @@ def as_dict(row):
 @app.route("/")
 def home():
     featured = db().execute("SELECT * FROM titles WHERE featured=1 ORDER BY id DESC LIMIT 1").fetchone()
-    popular = db().execute("SELECT * FROM titles ORDER BY featured DESC, rating DESC, id DESC LIMIT 12").fetchall()
-    movies = db().execute("SELECT * FROM titles WHERE kind='movie' ORDER BY id DESC LIMIT 12").fetchall()
-    tv = db().execute("SELECT * FROM titles WHERE kind='tv' ORDER BY id DESC LIMIT 12").fetchall()
-    api = active_api()
-    return render_template("home.html", featured=featured, popular=popular, movies=movies, tv=tv, api_connected=bool(api))
+    popular = db().execute("SELECT * FROM titles ORDER BY featured DESC, rating DESC, id DESC LIMIT 8").fetchall()
+    movies = db().execute("SELECT * FROM titles WHERE kind='movie' ORDER BY id DESC LIMIT 8").fetchall()
+    tv = db().execute("SELECT * FROM titles WHERE kind='tv' ORDER BY id DESC LIMIT 8").fetchall()
+    discover = get_home_discover()
+    return render_template("home.html", featured=featured, popular=popular, movies=movies, tv=tv, discover=discover, api_connected=bool(active_api()))
 
 
 @app.route("/join", methods=["GET", "POST"])
@@ -290,6 +297,17 @@ def browse():
     sql += " ORDER BY featured DESC, year DESC, id DESC"
     items = db().execute(sql, params).fetchall()
 
+    discover_results = []
+    discover_error = None
+    if query:
+        try:
+            kinds = [kind] if kind in {"movie", "tv"} else ["movie", "tv"]
+            for discover_kind in kinds:
+                discover_results.extend(cinemeta_search(query, discover_kind))
+        except Exception as exc:
+            discover_error = "Live movie/series discovery is temporarily unavailable."
+            log_system_error(exc, source="metadata-search", error_type=type(exc).__name__, status=502)
+
     api_results = []
     api_error = None
     cfg = active_api()
@@ -298,11 +316,11 @@ def browse():
             raw = api_get(cfg, cfg["search_path"], {cfg["search_param"] or "query": query})
             api_results = normalize_api_result(cfg, raw)
             if kind in {"movie", "tv"}:
-                api_results = [r for r in api_results if ("tv" in r["kind"] if kind == "tv" else "tv" not in r["kind"]) ]
+                api_results = [r for r in api_results if r["kind"] == kind]
         except Exception as exc:
-            api_error = "Connected API search failed. Check API & Integrations in Admin."
-            log_system_error(exc, source="api-search", error_type=type(exc).__name__, status=502)
-    return render_template("browse.html", items=items, query=query, kind=kind, genre=genre, api_results=api_results, api_connected=bool(cfg), api_error=api_error)
+            api_error = "Connected playback API search failed. The live discovery cards are still available."
+            log_system_error(exc, source="playback-api-search", error_type=type(exc).__name__, status=502)
+    return render_template("browse.html", items=items, query=query, kind=kind, genre=genre, discover_results=discover_results, api_results=api_results, api_connected=bool(cfg), api_error=api_error, discover_error=discover_error)
 
 
 @app.route("/title/<int:title_id>")
@@ -371,6 +389,101 @@ def download(title_id):
     if not path or not path.exists():
         abort(404)
     return send_file(path, as_attachment=True, download_name=path.name)
+
+
+# ----------------------- Public metadata discovery -----------------------
+
+CINEMETA_BASE = os.environ.get("CINEMETA_BASE", "https://v3-cinemeta.strem.io").rstrip("/")
+
+HOME_DISCOVERY = [
+    ("movie", "tt1375666"),  # Inception
+    ("movie", "tt0816692"),  # Interstellar
+    ("movie", "tt0111161"),  # The Shawshank Redemption
+    ("movie", "tt0468569"),  # The Dark Knight
+    ("tv", "tt0903747"),     # Breaking Bad
+    ("tv", "tt4574334"),     # Stranger Things
+    ("tv", "tt0944947"),     # Game of Thrones
+    ("tv", "tt3581920"),     # The Last of Us
+]
+
+def metadata_request(url, timeout=12):
+    response = requests.get(url, headers={"Accept": "application/json"}, timeout=timeout)
+    response.raise_for_status()
+    return response.json()
+
+def parse_year(value):
+    if not value:
+        return ""
+    text = str(value)
+    match = re.search(r"(\d{4})", text)
+    return match.group(1) if match else text[:4]
+
+def normalize_cinemeta_meta(meta, fallback_kind="movie"):
+    if not isinstance(meta, dict):
+        return None
+    item_id = meta.get("id")
+    title = meta.get("name") or meta.get("title")
+    if not item_id or not title:
+        return None
+    kind = meta.get("type") or fallback_kind
+    kind = "tv" if str(kind).lower() in {"series", "tv", "show"} else "movie"
+    poster = meta.get("poster") or ""
+    backdrop = meta.get("background") or meta.get("backdrop") or poster
+    return {
+        "id": str(item_id),
+        "title": str(title),
+        "poster": poster or ("/static/posters/series.svg" if kind == "tv" else "/static/posters/blaze.svg"),
+        "backdrop": backdrop or poster,
+        "year": parse_year(meta.get("releaseInfo") or meta.get("year") or meta.get("releaseDate")),
+        "kind": kind,
+        "description": str(meta.get("description") or meta.get("overview") or ""),
+        "rating": str(meta.get("imdbRating") or ""),
+        "genre": ", ".join(meta.get("genre", [])) if isinstance(meta.get("genre"), list) else str(meta.get("genre") or ""),
+    }
+
+def cinemeta_search(query, kind):
+    encoded = quote(query, safe="")
+    data = metadata_request(f"{CINEMETA_BASE}/catalog/{kind}/top/search={encoded}.json")
+    metas = data.get("metas") if isinstance(data, dict) else []
+    return [x for x in (normalize_cinemeta_meta(m, kind) for m in metas or []) if x]
+
+def cinemeta_meta(kind, external_id):
+    key = f"meta:{kind}:{external_id}"
+    conn = sqlite3.connect(DB_PATH, timeout=10)
+    conn.row_factory = sqlite3.Row
+    try:
+        cached = conn.execute("SELECT payload_json FROM metadata_cache WHERE cache_key=?", (key,)).fetchone()
+        if cached:
+            try:
+                return json.loads(cached["payload_json"])
+            except Exception:
+                pass
+        data = metadata_request(f"{CINEMETA_BASE}/meta/{kind}/{quote(str(external_id), safe=":")}.json")
+        meta = normalize_cinemeta_meta(data.get("meta") if isinstance(data, dict) else None, kind)
+        if not meta:
+            raise ValueError("No metadata was returned for that title.")
+        conn.execute("INSERT OR REPLACE INTO metadata_cache(cache_key,payload_json,updated_at) VALUES(?,?,?)", (key, json.dumps(meta), now_iso()))
+        conn.commit()
+        return meta
+    finally:
+        conn.close()
+
+def get_home_discover():
+    output = []
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        futures = {pool.submit(cinemeta_meta, kind, external_id): (kind, external_id) for kind, external_id in HOME_DISCOVERY}
+        for future in as_completed(futures):
+            kind, external_id = futures[future]
+            try:
+                item = future.result()
+                if item:
+                    output.append(item)
+            except Exception as exc:
+                # Keep the home page usable when the public metadata provider is temporarily unavailable.
+                log_system_error(exc, source="metadata-home", error_type=type(exc).__name__, status=502, severity="WARNING")
+    order = {external_id: i for i, (_, external_id) in enumerate(HOME_DISCOVERY)}
+    output.sort(key=lambda item: order.get(item["id"], 999))
+    return output
 
 
 # ----------------------- Generic authorized API connector -----------------------
@@ -443,7 +556,13 @@ def api_url(cfg, path, **values):
     base = (cfg["base_url"] or "").strip()
     path = (path or "").strip()
     for key, value in values.items():
-        path = path.replace("{" + key + "}", quote(str(value), safe=""))
+        encoded = quote(str(value), safe="")
+        path = path.replace("{" + key + "}", encoded)
+        path = path.replace(":" + key, encoded)
+    # Common provider spelling used for subject IDs.
+    if "id" in values:
+        encoded_id = quote(str(values["id"]), safe="")
+        path = path.replace(":subjectId", encoded_id)
     return urljoin(base.rstrip("/") + "/", path.lstrip("/"))
 
 
@@ -538,6 +657,7 @@ def stream_value(cfg, raw):
 
 @app.route("/api-library")
 def api_library():
+    require_admin()
     cfg = active_api()
     q = request.args.get("q", "").strip()
     results = []
@@ -554,42 +674,111 @@ def api_library():
     return render_template("api_library.html", config=cfg, query=q, results=results, error=error)
 
 
+@app.route("/external/<kind>/<path:external_id>")
+def external_details(kind, external_id):
+    if kind not in {"movie", "tv"}:
+        abort(404)
+    try:
+        data = metadata_request(f"{CINEMETA_BASE}/meta/{kind}/{quote(str(external_id), safe=":")}.json")
+        raw_meta = data.get("meta") if isinstance(data, dict) else None
+        item = normalize_cinemeta_meta(raw_meta, kind)
+        if not item:
+            raise ValueError("No metadata was returned for that title.")
+        # Keep the normalized card cached so future home/detail views are quick.
+        db().execute("INSERT OR REPLACE INTO metadata_cache(cache_key,payload_json,updated_at) VALUES(?,?,?)", (f"meta:{kind}:{external_id}", json.dumps(item), now_iso()))
+        db().commit()
+        cfg = active_api()
+        provider_info = None
+        info_error = None
+        episodes = []
+        provider_id = request.args.get("provider_id", "").strip()
+        provider_title = ""
+        if cfg and not provider_id and cfg["search_path"]:
+            try:
+                provider_raw = api_get(cfg, cfg["search_path"], {cfg["search_param"] or "query": item["title"]})
+                provider_matches = [m for m in normalize_api_result(cfg, provider_raw) if m["kind"] == kind]
+                exact = next((m for m in provider_matches if m["title"].casefold() == item["title"].casefold()), None)
+                chosen = exact or (provider_matches[0] if provider_matches else None)
+                if chosen:
+                    provider_id = chosen["id"]
+                    provider_title = chosen["title"]
+            except Exception as exc:
+                info_error = "Playback source could not match this title yet."
+                log_system_error(exc, source="playback-api-match", error_type=type(exc).__name__, status=502, severity="WARNING")
+        if kind == "tv" and isinstance(raw_meta, dict):
+            for video in raw_meta.get("videos") or []:
+                if not isinstance(video, dict):
+                    continue
+                season = video.get("season")
+                episode = video.get("episode")
+                if season is None or episode is None or int(season) < 1:
+                    continue
+                episodes.append({
+                    "season": int(season),
+                    "episode": int(episode),
+                    "name": str(video.get("name") or video.get("title") or f"Episode {episode}"),
+                })
+            episodes.sort(key=lambda e: (e["season"], e["episode"]))
+        if cfg and cfg["info_path"] and provider_id:
+            try:
+                info_path = api_url(cfg, cfg["info_path"], id=provider_id, external_id=provider_id)
+                response = requests.get(info_path, headers=api_headers(cfg), timeout=15)
+                response.raise_for_status()
+                provider_info = response.json()
+            except Exception as exc:
+                info_error = "Playback provider details could not be loaded; you can still use the metadata card."
+                log_system_error(exc, source="playback-api-info", error_type=type(exc).__name__, status=502, severity="WARNING")
+        return render_template("external_details.html", item=item, cfg=cfg, provider_info=provider_info, info_error=info_error, episodes=episodes, external_id=external_id, provider_id=provider_id, provider_title=provider_title)
+    except Exception as exc:
+        log_system_error(exc, source="metadata-detail", error_type=type(exc).__name__, status=502)
+        fallback = {"title":"Title unavailable","description":"","poster":"/static/posters/blaze.svg","backdrop":"/static/posters/blaze.svg","kind":kind,"year":"", "rating":""}
+        return render_template("external_details.html", item=fallback, cfg=active_api(), provider_info=None, info_error="This title could not be loaded right now. Check Admin → System errors.", episodes=[], external_id=external_id, provider_id=request.args.get("provider_id", ""), provider_title=""), 502
+
 @app.route("/api/external/<path:external_id>")
 def api_external_info(external_id):
     cfg = active_api()
     if not cfg or not cfg["info_path"]:
-        return jsonify({"error": "No active API info endpoint configured."}), 400
+        return jsonify({"error": "No active playback API info endpoint configured."}), 400
     try:
         raw = api_get(cfg, cfg["info_path"].replace("{id}", quote(external_id, safe="")), {})
         return jsonify({"data": raw})
     except Exception as exc:
-        log_system_error(exc, source="api-info", error_type=type(exc).__name__, status=502)
+        log_system_error(exc, source="playback-api-info", error_type=type(exc).__name__, status=502)
         return jsonify({"error": str(exc), "request_id": getattr(g, "request_id", "")}), 502
 
-
-@app.route("/api-external-watch/<path:external_id>")
-def api_external_watch(external_id):
+@app.route("/external-watch/<kind>/<path:external_id>")
+def external_watch(kind, external_id):
     cfg = active_api()
     if not cfg or not cfg["stream_path"]:
-        return render_template("external_player.html", item={"title": "API title", "description": ""}, stream_url=None, error="No stream endpoint has been configured in Admin → API & Integrations."), 400
+        return render_template("external_player.html", item={"title": request.args.get("title", "TM & S title"), "description": ""}, stream_url=None, error="No playback API is active. Add one in the Admin area first."), 400
+    season = request.args.get("season", "")
+    episode = request.args.get("episode", "")
     try:
-        path = cfg["stream_path"].replace("{id}", quote(external_id, safe=""))
-        raw = api_get(cfg, path, {})
+        playback_id = request.args.get("provider_id", "").strip() or external_id
+        path = api_url(cfg, cfg["stream_path"], id=playback_id, external_id=playback_id, season=season, episode=episode)
+        response = requests.get(path, headers=api_headers(cfg), timeout=15)
+        response.raise_for_status()
+        raw = response.json()
         stream = stream_value(cfg, raw)
         if not stream:
-            raise ValueError("The configured API did not return a recognizable playable URL. Set Stream URL field/path in Admin.")
+            raise ValueError("The configured playback API did not return a recognizable playable URL. Review Stream URL mapping in Admin.")
         display_title = request.args.get("title", external_id)
-        return render_template("external_player.html", item={"title": display_title, "description": "External API playback"}, stream_url=stream, error=None)
+        return render_template("external_player.html", item={"title": display_title, "description": "Playback from the configured provider."}, stream_url=stream, error=None)
     except Exception as exc:
         display_title = request.args.get("title", external_id)
-        log_system_error(exc, source="api-playback", error_type=type(exc).__name__, status=502)
-        return render_template("external_player.html", item={"title": display_title, "description": ""}, stream_url=None, error=f"API playback failed: {exc}. Request ID: {getattr(g, 'request_id', '')}"), 502
+        log_system_error(exc, source="playback-api-stream", error_type=type(exc).__name__, status=502)
+        return render_template("external_player.html", item={"title": display_title, "description": ""}, stream_url=None, error=f"Playback failed: {exc}. Request ID: {getattr(g, 'request_id', '')}"), 502
+
+# Backward-compatible internal endpoint used by older templates; it now delegates to the same connector.
+@app.route("/api-external-watch/<path:external_id>")
+def api_external_watch_legacy(external_id):
+    return redirect(url_for("external_watch", kind=request.args.get("kind", "movie"), external_id=external_id, title=request.args.get("title", external_id), season=request.args.get("season", ""), episode=request.args.get("episode", "")))
 
 
 # ------------------------------ Admin ---------------------------------
 
-def admin_key():
-    return os.environ.get("ADMIN_KEY", "change-me")
+def admin_name():
+    return os.environ.get("ADMIN_NAME", "admin").strip()
 
 
 def is_admin():
@@ -598,28 +787,20 @@ def is_admin():
 
 def require_admin():
     if not is_admin():
-        abort(401)
+        abort(404)
 
 
-@app.route("/admin/login", methods=["GET", "POST"])
-def admin_login():
-    if request.method == "POST":
-        if request.form.get("key", "") == admin_key():
-            session["admin_authenticated"] = True
-            return redirect(url_for("admin"))
-        return render_template("admin_login.html", error="Invalid admin key."), 401
-    return render_template("admin_login.html", error=None)
-
-
-@app.route("/admin/logout")
-def admin_logout():
-    session.pop("admin_authenticated", None)
-    return redirect(url_for("home"))
-
-
-@app.route("/admin", methods=["GET", "POST"])
+@app.route("/promise21232425", methods=["GET", "POST"])
 def admin():
-    require_admin()
+    # One doorway: GET shows the single admin-name box; authenticated POST handles dashboard actions.
+    if not is_admin():
+        if request.method == "POST":
+            entered = request.form.get("admin_name", "").strip()
+            if entered and entered == admin_name():
+                session["admin_authenticated"] = True
+                return redirect(url_for("admin"))
+            return render_template("admin_login.html", error="That admin name does not match the name configured on Render."), 401
+        return render_template("admin_login.html", error=None)
     conn = db()
     if request.method == "POST":
         action = request.form.get("action")
@@ -659,10 +840,10 @@ def admin():
                     raise ValueError("Headers/Auth must be a JSON object.")
             except (json.JSONDecodeError, ValueError) as exc:
                 log_system_error(exc, source="admin-api", error_type=type(exc).__name__, status=400, severity="WARNING")
-                return render_template("admin.html", items=conn.execute("SELECT * FROM titles ORDER BY id DESC").fetchall(), users=conn.execute("SELECT * FROM users ORDER BY id DESC").fetchall(), apis=conn.execute("SELECT * FROM api_configs ORDER BY id DESC").fetchall(), admin_key=admin_key(), api_error=str(exc), errors=recent_errors(), **admin_counts()), 400
+                return render_template("admin.html", items=conn.execute("SELECT * FROM titles ORDER BY id DESC").fetchall(), users=conn.execute("SELECT * FROM users ORDER BY id DESC").fetchall(), apis=conn.execute("SELECT * FROM api_configs ORDER BY id DESC").fetchall(), admin_name=admin_name(), api_error=str(exc), errors=recent_errors(), **admin_counts()), 400
             config_id = request.form.get("config_id", type=int)
             if not request.form.get("base_url", "").strip():
-                return render_template("admin.html", items=conn.execute("SELECT * FROM titles ORDER BY id DESC").fetchall(), users=conn.execute("SELECT * FROM users ORDER BY id DESC").fetchall(), apis=conn.execute("SELECT * FROM api_configs ORDER BY id DESC").fetchall(), admin_key=admin_key(), api_error="Base URL is required.", errors=recent_errors(), **admin_counts()), 400
+                return render_template("admin.html", items=conn.execute("SELECT * FROM titles ORDER BY id DESC").fetchall(), users=conn.execute("SELECT * FROM users ORDER BY id DESC").fetchall(), apis=conn.execute("SELECT * FROM api_configs ORDER BY id DESC").fetchall(), admin_name=admin_name(), api_error="Base URL is required.", errors=recent_errors(), **admin_counts()), 400
             defaults = apply_api_defaults(request.form)
             defaults["headers_json"] = headers_text
             values = (
@@ -712,7 +893,7 @@ def admin():
     items = conn.execute("SELECT * FROM titles ORDER BY id DESC").fetchall()
     users = conn.execute("SELECT * FROM users ORDER BY id DESC").fetchall()
     apis = conn.execute("SELECT * FROM api_configs ORDER BY id DESC").fetchall()
-    return render_template("admin.html", items=items, users=users, apis=apis, admin_key=admin_key(), api_error=None, errors=recent_errors(), **admin_counts())
+    return render_template("admin.html", items=items, users=users, apis=apis, admin_name=admin_name(), api_error=None, errors=recent_errors(), **admin_counts())
 
 
 def recent_errors(limit=100):
@@ -729,7 +910,7 @@ def admin_counts():
     }
 
 
-@app.route("/admin/delete/<int:title_id>", methods=["POST"])
+@app.route("/promise21232425/delete/<int:title_id>", methods=["POST"])
 def admin_delete(title_id):
     require_admin()
     conn = db()
@@ -739,7 +920,7 @@ def admin_delete(title_id):
     return redirect(url_for("admin"))
 
 
-@app.route("/admin/users.csv")
+@app.route("/promise21232425/users.csv")
 def users_csv():
     require_admin()
     rows = db().execute("SELECT * FROM users ORDER BY id DESC").fetchall()
@@ -754,6 +935,17 @@ def users_csv():
 @app.context_processor
 def globals_for_templates():
     return {"app_name": "TM & S", "year_now": datetime.now().year, "signed_in_user": session.get("user_id"), "admin_signed_in": is_admin()}
+
+
+@app.route("/api/client-error", methods=["POST"])
+def api_client_error():
+    payload = request.get_json(silent=True) or {}
+    message = str(payload.get("message") or "Client-side error")
+    source = str(payload.get("source") or "browser")
+    error_type = str(payload.get("error_type") or "ClientError")
+    route = str(payload.get("route") or request.referrer or request.path)
+    log_system_error(message, source=source, error_type=error_type, status=400, severity="ERROR")
+    return jsonify({"ok": True, "request_id": getattr(g, "request_id", "")})
 
 
 @app.route("/api/search")

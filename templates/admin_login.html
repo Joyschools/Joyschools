@@ -1,3 +1,14 @@
 {% extends "base.html" %}
 {% block title %}Admin · {{ app_name }}{% endblock %}
-{% block content %}<section class="center-page"><form class="admin-card" method="post"><div class="eyebrow">PRIVATE AREA</div><h1>Admin dashboard</h1><p class="muted">Enter the admin key stored in your Render environment variables.</p>{% if error %}<div class="alert">{{ error }}</div>{% endif %}<input class="field" name="key" type="password" placeholder="Admin key" required><button class="btn primary full" type="submit">Open dashboard</button></form></section>{% endblock %}
+{% block content %}
+<section class="center-page">
+  <form class="admin-card" method="post">
+    <div class="eyebrow">PRIVATE ADMIN</div>
+    <h1>TM & S Admin</h1>
+    <p class="muted">Enter the admin name configured in Render.</p>
+    {% if error %}<div class="alert">{{ error }}</div>{% endif %}
+    <input class="field" name="admin_name" type="text" placeholder="Admin name" autocomplete="off" autofocus required>
+    <button class="btn primary full" type="submit">Open dashboard</button>
+  </form>
+</section>
+{% endblock %}

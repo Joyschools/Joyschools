@@ -16,13 +16,12 @@
       <a href="{{ url_for('browse', kind='movie') }}">Movies</a>
       <a href="{{ url_for('browse', kind='tv') }}">TV Shows</a>
       <a href="{{ url_for('browse') }}">Library</a>
-      <a href="{{ url_for('api_library') }}">API Library</a>
     </nav>
     <div class="nav-actions">
       <form class="search-mini" action="{{ url_for('browse') }}" method="get">
         <span>⌕</span><input name="q" placeholder="Search movies & shows..." autocomplete="off"><button type="submit">Search</button>
       </form>
-      {% if signed_in_user %}<a class="join-chip" href="{{ url_for('leave') }}" title="Sign out">Account</a>{% else %}<a class="join-chip" href="{{ url_for('join') }}">Join</a>{% endif %}<a class="profile-dot" href="{{ url_for('admin_login') }}" title="Admin dashboard">✦</a>
+      {% if signed_in_user %}<a class="join-chip" href="{{ url_for('leave') }}" title="Sign out">Account</a>{% else %}<a class="join-chip" href="{{ url_for('join') }}">Join</a>{% endif %}
     </div>
   </header>
 
@@ -33,7 +32,6 @@
     <a href="{{ url_for('browse', kind='movie') }}"><span>▶</span>Movies</a>
     <a href="{{ url_for('browse', kind='tv') }}"><span>▤</span>TV</a>
     <a href="{{ url_for('browse') }}"><span>⌕</span>Search</a>
-    <a href="{{ url_for('api_library') }}"><span>◈</span>API</a>
   </nav>
   <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 </body>

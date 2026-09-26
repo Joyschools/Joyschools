@@ -1,4 +1,22 @@
 document.addEventListener('DOMContentLoaded', () => {
+  const reportClientError = (error, source) => {
+    try {
+      fetch('/api/client-error', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          message: String(error?.message || error || 'Unknown client error'),
+          error_type: String(error?.name || 'ClientError'),
+          source: source || 'browser',
+          route: location.href
+        }),
+        keepalive: true
+      }).catch(() => {});
+    } catch (_) {}
+  };
+  window.addEventListener('error', event => reportClientError(event.error || event.message, 'browser-error'));
+  window.addEventListener('unhandledrejection', event => reportClientError(event.reason, 'browser-promise'));
+
   document.querySelectorAll('.quick-play').forEach(btn => {
     btn.addEventListener('click', e => {
       e.preventDefault(); e.stopPropagation();
