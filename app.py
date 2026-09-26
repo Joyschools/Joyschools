@@ -2,6 +2,7 @@ import json
 import os
 import re
 import sqlite3
+from difflib import SequenceMatcher
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,9 +33,10 @@ def now_iso():
 
 def db():
     if "db" not in g:
-        g.db = sqlite3.connect(DB_PATH)
+        g.db = sqlite3.connect(DB_PATH, timeout=20)
         g.db.row_factory = sqlite3.Row
         g.db.execute("PRAGMA foreign_keys=ON")
+        g.db.execute("PRAGMA busy_timeout=20000")
     return g.db
 
 
@@ -46,8 +48,11 @@ def close_db(_exc):
 
 
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA busy_timeout=30000")
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS titles (
@@ -168,19 +173,23 @@ def init_db():
     conn.close()
 
 
+# Initialize the schema once when the worker imports the application.
+# Render uses one Gunicorn worker in Procfile to keep SQLite predictable.
+init_db()
+
 @app.before_request
 def bootstrap():
-    init_db()
+    # Database initialization happens once at startup, not on every request.
+    # This avoids SQLite schema/write races when Render serves concurrent requests.
     g.request_id = request.headers.get("X-Request-ID") or os.urandom(8).hex()
     if session.get("user_id"):
-        g.db = sqlite3.connect(DB_PATH)
-        g.db.row_factory = sqlite3.Row
         try:
-            g.db.execute("UPDATE users SET last_seen=? WHERE id=?", (now_iso(), session["user_id"]))
-            g.db.commit()
-        finally:
-            g.db.close()
-            g.pop("db", None)
+            conn = sqlite3.connect(DB_PATH, timeout=5)
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute("UPDATE users SET last_seen=? WHERE id=?", (now_iso(), session["user_id"]))
+            conn.commit(); conn.close()
+        except sqlite3.Error as exc:
+            log_system_error(exc, source="session-last-seen", error_type=type(exc).__name__, status=503, severity="WARNING")
 
 
 def log_system_error(message, source="system", error_type="Exception", status=500, severity="ERROR"):
@@ -208,6 +217,8 @@ def handle_unexpected_error(exc):
     log_system_error(exc, source="app", error_type=type(exc).__name__, status=500)
     if request.path.startswith("/api/") or request.path.startswith("/api-"):
         return jsonify({"error": "TM & S encountered a system error.", "request_id": getattr(g, "request_id", "")}), 500
+    if request.path == "/promise21232425" and not is_admin():
+        return render_template("admin_login.html", error=f"TM & S encountered a system error. Request ID: {getattr(g, 'request_id', '')}"), 500
     return (f"TM & S encountered a system error. Request ID: {getattr(g, 'request_id', '')}", 500)
 
 
@@ -229,7 +240,9 @@ def home():
     movies = db().execute("SELECT * FROM titles WHERE kind='movie' ORDER BY id DESC LIMIT 8").fetchall()
     tv = db().execute("SELECT * FROM titles WHERE kind='tv' ORDER BY id DESC LIMIT 8").fetchall()
     discover = get_home_discover()
-    return render_template("home.html", featured=featured, popular=popular, movies=movies, tv=tv, discover=discover, api_connected=bool(active_api()))
+    discover_movies = [x for x in discover if x["kind"]=="movie"]
+    discover_tv = [x for x in discover if x["kind"]=="tv"]
+    return render_template("home.html", featured=featured, popular=popular, movies=movies, tv=tv, discover=discover, discover_movies=discover_movies, discover_tv=discover_tv, api_connected=bool(active_api()))
 
 
 @app.route("/join", methods=["GET", "POST"])
@@ -395,6 +408,10 @@ def download(title_id):
 
 CINEMETA_BASE = os.environ.get("CINEMETA_BASE", "https://v3-cinemeta.strem.io").rstrip("/")
 
+def cinemeta_kind_path(kind):
+    return "series" if kind == "tv" else kind
+
+
 HOME_DISCOVERY = [
     ("movie", "tt1375666"),  # Inception
     ("movie", "tt0816692"),  # Interstellar
@@ -443,7 +460,7 @@ def normalize_cinemeta_meta(meta, fallback_kind="movie"):
 
 def cinemeta_search(query, kind):
     encoded = quote(query, safe="")
-    data = metadata_request(f"{CINEMETA_BASE}/catalog/{kind}/top/search={encoded}.json")
+    data = metadata_request(f"{CINEMETA_BASE}/catalog/{cinemeta_kind_path(kind)}/top/search={encoded}.json")
     metas = data.get("metas") if isinstance(data, dict) else []
     return [x for x in (normalize_cinemeta_meta(m, kind) for m in metas or []) if x]
 
@@ -458,7 +475,7 @@ def cinemeta_meta(kind, external_id):
                 return json.loads(cached["payload_json"])
             except Exception:
                 pass
-        data = metadata_request(f"{CINEMETA_BASE}/meta/{kind}/{quote(str(external_id), safe=":")}.json")
+        data = metadata_request(f"{CINEMETA_BASE}/meta/{cinemeta_kind_path(kind)}/{quote(str(external_id), safe=":")}.json")
         meta = normalize_cinemeta_meta(data.get("meta") if isinstance(data, dict) else None, kind)
         if not meta:
             raise ValueError("No metadata was returned for that title.")
@@ -468,46 +485,61 @@ def cinemeta_meta(kind, external_id):
     finally:
         conn.close()
 
+def get_cinemeta_catalog(kind, catalog="top", limit=24):
+    key=f"catalog:{kind}:{catalog}:{limit}"
+    conn=sqlite3.connect(DB_PATH, timeout=10); conn.row_factory=sqlite3.Row
+    try:
+        cached=conn.execute("SELECT payload_json FROM metadata_cache WHERE cache_key=?",(key,)).fetchone()
+        if cached:
+            try: return json.loads(cached["payload_json"])
+            except Exception: pass
+        data=metadata_request(f"{CINEMETA_BASE}/catalog/{kind}/{catalog}.json")
+        metas=data.get("metas") if isinstance(data,dict) else []
+        out=[x for x in (normalize_cinemeta_meta(m,kind) for m in metas or []) if x][:limit]
+        conn.execute("INSERT OR REPLACE INTO metadata_cache(cache_key,payload_json,updated_at) VALUES(?,?,?)",(key,json.dumps(out),now_iso())); conn.commit()
+        return out
+    finally: conn.close()
+
 def get_home_discover():
-    output = []
-    with ThreadPoolExecutor(max_workers=6) as pool:
-        futures = {pool.submit(cinemeta_meta, kind, external_id): (kind, external_id) for kind, external_id in HOME_DISCOVERY}
-        for future in as_completed(futures):
-            kind, external_id = futures[future]
-            try:
-                item = future.result()
-                if item:
-                    output.append(item)
-            except Exception as exc:
-                # Keep the home page usable when the public metadata provider is temporarily unavailable.
-                log_system_error(exc, source="metadata-home", error_type=type(exc).__name__, status=502, severity="WARNING")
-    order = {external_id: i for i, (_, external_id) in enumerate(HOME_DISCOVERY)}
-    output.sort(key=lambda item: order.get(item["id"], 999))
-    return output
+    output=[]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures=[pool.submit(get_cinemeta_catalog,"movie","top",24),pool.submit(get_cinemeta_catalog,"series","top",24)]
+        for future in futures:
+            try: output.extend(future.result())
+            except Exception as exc: log_system_error(exc,source="metadata-home",error_type=type(exc).__name__,status=502,severity="WARNING")
+    # Keep a varied, deterministic mix and remove duplicate IDs.
+    seen=set(); unique=[]
+    for item in output:
+        key=(item["kind"],item["id"])
+        if key not in seen:
+            seen.add(key); unique.append(item)
+    return unique[:48]
 
 
 # ----------------------- Generic authorized API connector -----------------------
 
 API_DEFAULTS = {
+    # These defaults also match the MovieBox wrapper the user can enter manually.
     "search_path": "/search",
     "info_path": "/info/{id}",
     "seasons_path": "/seasons/{id}",
-    "episodes_path": "/episodes/{id}",
-    "stream_path": "/stream/{id}",
-    "download_path": "/dl/{id}",
-    "subtitles_path": "/subtitles/{id}",
-    "search_param": "query",
+    "episodes_path": "/episodes/{id}/{se}",
+    "stream_path": "/sources/{id}/{se}/{ep}",
+    "download_path": "/download/{id}/{se}",
+    "subtitles_path": "/captions/ext/{id}/{resourceId}/{ep}",
+    "search_param": "q",
     "headers_json": "{}",
     "search_results_path": "results",
-    "id_key": "id",
+    "id_key": "subjectId",
     "title_key": "title",
     "poster_key": "poster",
     "backdrop_key": "backdrop",
-    "year_key": "year",
-    "type_key": "type",
+    "year_key": "releaseDate",
+    "type_key": "subjectType",
     "description_key": "description",
     "stream_url_key": "url",
 }
+
 
 def apply_api_defaults(form):
     out = {}
@@ -577,16 +609,36 @@ def api_get(cfg, path, params=None):
     return response.json()
 
 
+def normalize_kind(value):
+    text = str(value or "").strip().lower()
+    if text in {"2", "tv", "series", "show", "tvshow", "tv-series", "television"}:
+        return "tv"
+    if text in {"1", "movie", "film", "feature"}:
+        return "movie"
+    if text in {"7", "shorts", "short"}:
+        return "tv"
+    return "tv" if "tv" in text or "series" in text else "movie"
+
 def normalize_api_result(cfg, raw):
     configured = json_path(raw, cfg["search_results_path"])
     results = configured
     if results is None:
         results = raw.get("results") if isinstance(raw, dict) else None
     if results is None and isinstance(raw, dict):
-        for key in ("data", "items", "list", "movies", "shows", "results"):
+        for key in ("data", "items", "list", "movies", "shows", "series", "subjects", "results"):
             if isinstance(raw.get(key), list):
                 results = raw[key]
                 break
+        if results is None:
+            for parent in ("data", "result", "response"):
+                child = raw.get(parent)
+                if isinstance(child, dict):
+                    for key in ("items", "movies", "shows", "series", "subjects", "results"):
+                        if isinstance(child.get(key), list):
+                            results = child[key]
+                            break
+                if results is not None:
+                    break
     if not isinstance(results, list):
         if isinstance(raw, list):
             results = raw
@@ -598,18 +650,14 @@ def normalize_api_result(cfg, raw):
             continue
         title = json_path(item, cfg["title_key"]) if cfg["title_key"] else first_value(item, ["title", "name", "original_title", "subjectName"])
         external_id = json_path(item, cfg["id_key"]) if cfg["id_key"] else first_value(item, ["id", "subjectId", "subject_id", "tmdb_id"])
-        poster = json_path(item, cfg["poster_key"]) if cfg["poster_key"] else first_value(item, ["poster", "posterUrl", "poster_path", "image", "cover"])
-        backdrop = json_path(item, cfg["backdrop_key"]) if cfg["backdrop_key"] else first_value(item, ["backdrop", "backdropUrl", "backdrop_path", "background"])
+        poster = json_path(item, cfg["poster_key"]) if cfg["poster_key"] else first_value(item, ["poster", "posterUrl", "poster_path", "image", "cover", "coverUrl", "imageUrl"])
+        backdrop = json_path(item, cfg["backdrop_key"]) if cfg["backdrop_key"] else first_value(item, ["backdrop", "backdropUrl", "backdrop_path", "background", "backgroundUrl", "backdrop_url"])
         year = json_path(item, cfg["year_key"]) if cfg["year_key"] else first_value(item, ["year", "releaseYear", "release_date"])
         kind = json_path(item, cfg["type_key"]) if cfg["type_key"] else first_value(item, ["type", "kind", "media_type"])
         description = json_path(item, cfg["description_key"]) if cfg["description_key"] else first_value(item, ["description", "overview", "plot", "synopsis"])
         if not title or external_id is None:
             continue
-        kind_text = str(kind or "movie").lower()
-        if kind_text in {"series", "show", "tvshow", "tv-series", "television"}:
-            kind_text = "tv"
-        else:
-            kind_text = "tv" if "tv" in kind_text else "movie"
+        kind_text = normalize_kind(kind)
         output.append({
             "id": str(external_id),
             "title": str(title),
@@ -636,12 +684,12 @@ def stream_value(cfg, raw):
                     return found
         if isinstance(value, str):
             return value
-    candidates = ["url", "stream_url", "streamUrl", "playUrl", "play_url", "src", "videoUrl", "video_url", "file"]
+    candidates = ["url", "stream_url", "streamUrl", "playUrl", "play_url", "src", "videoUrl", "video_url", "file", "streamURL", "playbackUrl", "playback_url"]
     if isinstance(raw, dict):
         direct = first_value(raw, candidates)
         if direct:
             return direct
-        for key in ("data", "result", "source", "sources", "stream", "streams"):
+        for key in ("data", "result", "source", "sources", "stream", "streams", "resource", "resources", "playInfo", "play_info"):
             child = raw.get(key)
             if isinstance(child, (dict, list)):
                 found = stream_value(cfg, child)
@@ -674,12 +722,63 @@ def api_library():
     return render_template("api_library.html", config=cfg, query=q, results=results, error=error)
 
 
+def extract_provider_episodes(raw, default_season=None):
+    seasons = []
+    if isinstance(raw, dict):
+        for key in ("seasons", "data", "results", "items", "episodes"):
+            value = raw.get(key)
+            if isinstance(value, list):
+                if key == "episodes":
+                    value = [{"season": default_season or 1, "episodes": value}]
+                seasons.extend(value)
+            elif isinstance(value, dict) and key == "data":
+                for k in ("seasons", "episodes", "items", "results"):
+                    v=value.get(k)
+                    if isinstance(v,list):
+                        if k=="episodes": v=[{"season": default_season or 1, "episodes": v}]
+                        seasons.extend(v)
+    elif isinstance(raw, list):
+        seasons = [{"season": default_season or 1, "episodes": raw}]
+    out=[]
+    for group in seasons:
+        if not isinstance(group, dict):
+            continue
+        season = group.get("season") or group.get("seasonNumber") or default_season or 1
+        try: season=int(season)
+        except Exception: season=1
+        eps = group.get("episodes") or group.get("items") or group.get("results") or []
+        if isinstance(eps, dict): eps=list(eps.values())
+        if isinstance(eps, list) and eps and all(isinstance(x, dict) for x in eps):
+            for e in eps:
+                num=e.get("episode") or e.get("episodeNumber") or e.get("ep") or e.get("number")
+                if num is None: continue
+                try: num=int(num)
+                except Exception: continue
+                out.append({"season":season,"episode":num,"name":str(e.get("title") or e.get("name") or e.get("episodeTitle") or f"Episode {num}")})
+    unique={(x["season"],x["episode"]):x for x in out}
+    return sorted(unique.values(), key=lambda x:(x["season"],x["episode"]))
+
+def match_provider_title(query_title, provider_results, year=""):
+    if not provider_results:
+        return None
+    target = re.sub(r"[^a-z0-9]+", " ", query_title.casefold()).strip()
+    target_year = parse_year(year)
+    best=None; best_score=0.0
+    for candidate in provider_results:
+        cand = re.sub(r"[^a-z0-9]+", " ", candidate.get("title","").casefold()).strip()
+        score=SequenceMatcher(None,target,cand).ratio()
+        if target and cand == target: score += 0.5
+        if target_year and parse_year(candidate.get("year")) == target_year: score += 0.1
+        if score > best_score:
+            best_score=score; best=candidate
+    return best if best_score >= 0.62 else None
+
 @app.route("/external/<kind>/<path:external_id>")
 def external_details(kind, external_id):
     if kind not in {"movie", "tv"}:
         abort(404)
     try:
-        data = metadata_request(f"{CINEMETA_BASE}/meta/{kind}/{quote(str(external_id), safe=":")}.json")
+        data = metadata_request(f"{CINEMETA_BASE}/meta/{cinemeta_kind_path(kind)}/{quote(str(external_id), safe=":")}.json")
         raw_meta = data.get("meta") if isinstance(data, dict) else None
         item = normalize_cinemeta_meta(raw_meta, kind)
         if not item:
@@ -695,30 +794,52 @@ def external_details(kind, external_id):
         provider_title = ""
         if cfg and not provider_id and cfg["search_path"]:
             try:
-                provider_raw = api_get(cfg, cfg["search_path"], {cfg["search_param"] or "query": item["title"]})
+                provider_raw = api_get(cfg, cfg["search_path"], {cfg["search_param"] or "q": item["title"]})
                 provider_matches = [m for m in normalize_api_result(cfg, provider_raw) if m["kind"] == kind]
-                exact = next((m for m in provider_matches if m["title"].casefold() == item["title"].casefold()), None)
-                chosen = exact or (provider_matches[0] if provider_matches else None)
+                chosen = match_provider_title(item["title"], provider_matches, item.get("year", ""))
                 if chosen:
                     provider_id = chosen["id"]
                     provider_title = chosen["title"]
             except Exception as exc:
                 info_error = "Playback source could not match this title yet."
                 log_system_error(exc, source="playback-api-match", error_type=type(exc).__name__, status=502, severity="WARNING")
-        if kind == "tv" and isinstance(raw_meta, dict):
-            for video in raw_meta.get("videos") or []:
-                if not isinstance(video, dict):
-                    continue
-                season = video.get("season")
-                episode = video.get("episode")
-                if season is None or episode is None or int(season) < 1:
-                    continue
-                episodes.append({
-                    "season": int(season),
-                    "episode": int(episode),
-                    "name": str(video.get("name") or video.get("title") or f"Episode {episode}"),
-                })
-            episodes.sort(key=lambda e: (e["season"], e["episode"]))
+        if kind == "tv":
+            # Prefer the playback provider's actual seasons/episodes so the selected
+            # provider ID and episode numbering stay in sync. Fall back to metadata.
+            if cfg and provider_id and cfg["seasons_path"]:
+                try:
+                    season_raw = api_get(cfg, cfg["seasons_path"], {}) if "{id}" not in cfg["seasons_path"] else api_get(cfg, cfg["seasons_path"], {})
+                    episodes = extract_provider_episodes(season_raw)
+                except Exception as exc:
+                    log_system_error(exc, source="playback-api-seasons", error_type=type(exc).__name__, status=502, severity="WARNING")
+            if not episodes and cfg and provider_id and cfg["episodes_path"]:
+                for season_no in range(1, 13):
+                    try:
+                        path = api_url(cfg, cfg["episodes_path"], id=provider_id, external_id=provider_id, se=season_no, season=season_no)
+                        raw_eps = requests.get(path, headers=api_headers(cfg), params={"page":1,"perPage":50}, timeout=12)
+                        if raw_eps.status_code == 404:
+                            if season_no > 1: break
+                            continue
+                        raw_eps.raise_for_status()
+                        found = extract_provider_episodes(raw_eps.json(), default_season=season_no)
+                        episodes.extend(found)
+                        if not found and season_no > 1: break
+                    except Exception:
+                        if season_no > 1: break
+            if not episodes and isinstance(raw_meta, dict):
+                for video in raw_meta.get("videos") or []:
+                    if not isinstance(video, dict):
+                        continue
+                    season = video.get("season")
+                    episode = video.get("episode")
+                    if season is None or episode is None or int(season) < 1:
+                        continue
+                    episodes.append({
+                        "season": int(season),
+                        "episode": int(episode),
+                        "name": str(video.get("name") or video.get("title") or f"Episode {episode}"),
+                    })
+                episodes.sort(key=lambda e: (e["season"], e["episode"]))
         if cfg and cfg["info_path"] and provider_id:
             try:
                 info_path = api_url(cfg, cfg["info_path"], id=provider_id, external_id=provider_id)

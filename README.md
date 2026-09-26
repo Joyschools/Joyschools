@@ -33,3 +33,16 @@ The API form has a small set of fields for the information only you can know (ba
 ## Important
 
 Only connect playback sources and media you are authorised to access and distribute.
+
+
+## Render setup
+
+Set these Render environment variables:
+
+- `ADMIN_NAME` — the one admin name entered at `/promise21232425`.
+- `SECRET_KEY` — a long random value for Flask sessions.
+- `DATABASE_PATH` is optional; it defaults to `instance/tms.db`.
+
+The current manual API base mentioned for TM & S is `https://moviebox-api-eight.vercel.app`. The admin screen does **not** auto-save this or any credentials; paste it yourself when you are ready. Its public root currently documents GET `/search?q=<keyword>`, `/info/:subjectId`, `/seasons/:subjectId`, `/sources/:subjectId/:se/:ep`, and related routes.
+
+TM & S uses Cinemeta for public discovery metadata and the saved active API for provider matching/playback.

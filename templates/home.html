@@ -1,15 +1,19 @@
 {% extends "base.html" %}
 {% block title %}{{ app_name }} · Home{% endblock %}
 {% block content %}
-<section class="hero" style="--hero-image: url('{{ featured['backdrop'] if featured else (discover[0]['backdrop'] if discover else '/static/posters/bigbuck.svg') }}')">
+{% set lead = discover[0] if discover else None %}
+<section class="hero" style="--hero-image: url('{{ featured['backdrop'] if featured else (lead['backdrop'] if lead else '/static/posters/bigbuck.svg') }}')">
   <div class="hero-shade"></div>
   <div class="hero-copy">
-    <div class="eyebrow">PRIVATE CINEMA</div>
-    <h1>{{ featured['title'] if featured else (discover[0]['title'] if discover else 'Your next story starts here.') }}</h1>
-    <div class="meta"><span>{{ featured['year'] if featured else (discover[0]['year'] if discover else year_now) }}</span><i>•</i><span>{{ featured['duration'] if featured else 'On demand' }}</span><i>•</i><span>HD</span></div>
-    <p>{{ featured['description'] if featured else (discover[0]['description'] if discover else 'Search movies and series, then connect your playback source from the private admin area.') }}</p>
-    {% if featured %}<div class="hero-buttons"><a class="btn primary" href="{{ url_for('watch', title_id=featured['id']) }}">▶ Watch now</a><a class="btn ghost" href="{{ url_for('details', title_id=featured['id']) }}">More info</a></div>
-    {% elif discover %}<div class="hero-buttons"><a class="btn primary" href="{{ url_for('external_details', kind=discover[0]['kind'], external_id=discover[0]['id']) }}">View title</a><a class="btn ghost" href="{{ url_for('browse') }}">Search library</a></div>{% endif %}
+    <div class="eyebrow">TM & S · MOVIES & SERIES</div>
+    <h1>{{ featured['title'] if featured else (lead['title'] if lead else 'Find something worth watching.') }}</h1>
+    <div class="meta"><span>{{ featured['year'] if featured else (lead['year'] if lead else year_now) }}</span><i>•</i><span>{{ featured['duration'] if featured else 'On demand' }}</span><i>•</i><span>HD</span></div>
+    <p>{{ featured['description'] if featured else (lead['description'] if lead else 'Search movies and series and open any title for its full details.') }}</p>
+    <div class="hero-buttons">
+      {% if featured %}<a class="btn primary" href="{{ url_for('watch', title_id=featured['id']) }}">▶ Watch now</a><a class="btn ghost" href="{{ url_for('details', title_id=featured['id']) }}">More info</a>
+      {% elif lead %}<a class="btn primary" href="{{ url_for('external_details', kind=lead['kind'], external_id=lead['id']) }}">View title</a><a class="btn ghost" href="{{ url_for('browse') }}">Browse all</a>
+      {% else %}<a class="btn primary" href="{{ url_for('browse') }}">Search movies & shows</a>{% endif %}
+    </div>
   </div>
 </section>
 
@@ -18,43 +22,33 @@
   <div class="intro-actions"><a class="text-link" href="{{ url_for('browse') }}">Browse all →</a>{% if not signed_in_user %}<a class="btn primary small" href="{{ url_for('join') }}">Join TM & S</a>{% endif %}</div>
 </section>
 
-{% macro local_shelf(title, items) %}
+{% macro discovery_shelf(title, items, href_kind=None) %}
+{% if items %}
 <section class="section shelf-section">
-  <div class="section-head"><h2>{{ title }}</h2><a class="text-link" href="{{ url_for('browse') }}">See all</a></div>
+  <div class="section-head"><div><h2>{{ title }}</h2><p class="muted">Real titles and artwork.</p></div><a class="text-link" href="{{ url_for('browse', kind=href_kind) if href_kind else url_for('browse') }}">See all →</a></div>
   <div class="poster-grid">
     {% for item in items %}
-      <a class="poster-card" href="{{ url_for('details', title_id=item['id']) }}">
-        <div class="poster-wrap"><img src="{{ item['poster'] }}" alt="{{ item['title'] }} poster"><span class="badge">{{ item['kind']|upper }}</span><button class="quick-play" type="button" data-play="{{ url_for('watch', title_id=item['id']) }}">▶</button></div>
-        <div class="poster-title">{{ item['title'] }}</div>
-        <div class="poster-meta">{{ item['year'] or '' }}{% if item['rating'] %} · ★ {{ item['rating'] }}{% endif %}</div>
-      </a>
+    <a class="poster-card" href="{{ url_for('external_details', kind=item['kind'], external_id=item['id']) }}">
+      <div class="poster-wrap"><img src="{{ item['poster'] }}" alt="{{ item['title'] }} poster" loading="lazy"><span class="badge">{{ item['kind']|upper }}</span><button class="quick-play" type="button" data-play="{{ url_for('external_details', kind=item['kind'], external_id=item['id']) }}">▶</button></div>
+      <div class="poster-title">{{ item['title'] }}</div><div class="poster-meta">{{ item['year'] or '' }}{% if item['rating'] %} · ★ {{ item['rating'] }}{% endif %}</div>
+    </a>
     {% endfor %}
   </div>
 </section>
+{% endif %}
 {% endmacro %}
 
-<section class="section shelf-section">
-  <div class="section-head"><div><h2>Discover movies & series</h2><p class="muted">Real titles and artwork. Search anything from the main search bar.</p></div><a class="text-link" href="{{ url_for('browse') }}">Search →</a></div>
-  <div class="poster-grid">
-    {% for item in discover %}
-      <a class="poster-card" href="{{ url_for('external_details', kind=item['kind'], external_id=item['id']) }}">
-        <div class="poster-wrap"><img src="{{ item['poster'] }}" alt="{{ item['title'] }} poster" loading="lazy"><span class="badge">{{ item['kind']|upper }}</span><button class="quick-play" type="button" data-play="{{ url_for('external_details', kind=item['kind'], external_id=item['id']) }}">▶</button></div>
-        <div class="poster-title">{{ item['title'] }}</div>
-        <div class="poster-meta">{{ item['year'] }}{% if item['rating'] %} · ★ {{ item['rating'] }}{% endif %}</div>
-      </a>
-    {% else %}
-      <div class="empty compact"><div>◈</div><h3>Discovery is connecting</h3><p>The public metadata service could not be reached. Your local catalogue is still available.</p></div>
-    {% endfor %}
-  </div>
-</section>
+{{ discovery_shelf('Popular movies', discover_movies[:12], 'movie') }}
+{{ discovery_shelf('Popular series', discover_tv[:12], 'tv') }}
+{{ discovery_shelf('More to discover', discover[24:48]) }}
 
-{{ local_shelf('Your library', popular) }}
-{{ local_shelf('Movies', movies) }}
-{{ local_shelf('TV Shows', tv) }}
+{% if popular %}
+<section class="section shelf-section"><div class="section-head"><div><h2>Your library</h2><p class="muted">Authorised media you added yourself.</p></div><a class="text-link" href="{{ url_for('browse') }}">See all →</a></div><div class="poster-grid">{% for item in popular %}<a class="poster-card" href="{{ url_for('details', title_id=item['id']) }}"><div class="poster-wrap"><img src="{{ item['poster'] }}" alt="{{ item['title'] }} poster" loading="lazy"><span class="badge">{{ item['kind']|upper }}</span></div><div class="poster-title">{{ item['title'] }}</div><div class="poster-meta">{{ item['year'] or '' }}</div></a>{% endfor %}</div></section>
+{% endif %}
 
 <section class="section feature-strip">
-  <div class="feature-card"><div class="feature-icon">⌕</div><div><strong>Search anything</strong><span>Movie and series discovery is separate from playback, so your catalogue can stay clean.</span></div></div>
-  <div class="feature-card"><div class="feature-icon">▶</div><div><strong>Connect your source</strong><span>Choose the playback API you save in the private admin dashboard.</span></div></div>
+  <div class="feature-card"><div class="feature-icon">⌕</div><div><strong>Search anything</strong><span>Search the full movie and series catalogue from the main search bar.</span></div></div>
+  <div class="feature-card"><div class="feature-icon">▶</div><div><strong>One-click provider connection</strong><span>Your private admin API controls playback after you connect it.</span></div></div>
   <div class="feature-card"><div class="feature-icon">⇩</div><div><strong>Phone + PC</strong><span>The same responsive TM & S experience follows you across screens.</span></div></div>
 </section>
 {% endblock %}
